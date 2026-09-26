@@ -1,0 +1,28 @@
+[21:01:52.257] auto-wake enabled
+[21:01:52.272] scanning started
+[21:01:52.346] found LHB-43C19611 (ded35a94c1e9, -78 dBm), auto-wake
+[21:01:52.812] found LHB-091352AE (d34fe5854d76, -78 dBm), auto-wake
+[21:01:52.816] found LHB-26D0B7C5 (d47eb7e6b117, -76 dBm), auto-wake
+[21:01:53.057] found LHB-B32EF4A4 (d54097521a72, -68 dBm), auto-wake
+[21:01:53.886] ded35a94c1e9 wake attempt 1 failed: no power control found
+[21:01:56.576] ded35a94c1e9 wake -> ok
+[21:01:58.863] d34fe5854d76 wake -> ok
+[21:02:01.485] d47eb7e6b117 wake -> ok
+[21:02:03.832] d54097521a72 wake -> ok
+[21:02:05.383] exit: sending standby to 4 known station(s), budget 24000 ms
+[21:02:07.680] d34fe5854d76 standby -> ok
+[21:02:11.250] d47eb7e6b117 standby -> ok
+[21:02:14.941] d54097521a72 standby attempt 1 failed: no power control found
+[21:02:15.592] d54097521a72 standby -> ok
+[21:02:18.630] ded35a94c1e9 standby -> ok
+[21:02:18.668] exit: standby commands completed, verifying states
+[21:02:21.763] d34fe5854d76 reports state 0x02 (standby)
+[21:02:21.765] d34fe5854d76 refresh -> ok
+[21:02:24.418] d47eb7e6b117 reports state 0x02 (standby)
+[21:02:24.421] d47eb7e6b117 refresh -> ok
+[21:02:26.094] d54097521a72 refresh attempt 1 failed: no power control found
+[21:02:28.737] d54097521a72 reports state 0x02 (standby)
+[21:02:28.741] d54097521a72 refresh -> ok
+[21:02:31.363] ded35a94c1e9 reports state 0x02 (standby)
+[21:02:31.365] ded35a94c1e9 refresh -> ok
+[21:02:31.393] exit: state verification done

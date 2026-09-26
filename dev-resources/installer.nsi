@@ -98,6 +98,19 @@ FunctionEnd
 
 Section "Install" SecInstall
 
+    ; A running SteamVR keeps the driver DLL locked and would not load a newly registered driver.
+    steamvrcheck:
+    FindWindow $0 "" "SteamVR Status"
+    StrCmp $0 0 steamvrclosed
+        MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION "Please close SteamVR before installing ${APP_NAME}.$\n$\nClick Retry once SteamVR is closed." /SD IDCANCEL IDRETRY steamvrcheck
+        Abort "SteamVR is still running."
+    steamvrclosed:
+
+    ; Close a running SpaceSync so its files can be replaced.
+    nsExec::Exec 'taskkill /IM SpaceSync.exe /F'
+    Pop $0
+    Sleep 500
+
     ; Remove an old OpenVR-SpaceOverride install so there aren't two drivers.
     IfFileExists "$PROGRAMFILES64\${LEGACY_APP_NAME}\Uninstall.exe" 0 nolegacy
         DetailPrint "Removing previous OpenVR-SpaceOverride installation..."
@@ -140,14 +153,31 @@ Section "Install" SecInstall
 	nsExec::ExecToStack '"$INSTDIR\SpaceSync.exe" -openvrpath'
 	Pop $0
 	Pop $vrRuntimePath
+	StrCmp $0 "0" runtimefound
+		StrCpy $vrRuntimePath ""
+		ReadRegStr $vrRuntimePath HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\Steam App 250820" "InstallLocation"
+	runtimefound:
 	DetailPrint "VR runtime path: $vrRuntimePath"
 
-    ExecWait '"$vrRuntimePath\bin\win64\vrpathreg.exe" adddriver "$INSTDIR\driver"'
+	IfFileExists "$vrRuntimePath\bin\win64\vrpathreg.exe" 0 noruntime
+		nsExec::ExecToLog '"$vrRuntimePath\bin\win64\vrpathreg.exe" adddriver "$INSTDIR\driver"'
+		Pop $0
+		DetailPrint "Driver registration exit code: $0"
+		Goto runtimedone
+	noruntime:
+		MessageBox MB_OK|MB_ICONEXCLAMATION "SteamVR could not be found, so the SpaceSync driver was not registered.$\n$\nInstall SteamVR and start it once, then run this installer again." /SD IDOK
+	runtimedone:
 
 	SetOutPath "$INSTDIR"
 	CreateShortCut "$SMPROGRAMS\${APP_NAME}.lnk" "$INSTDIR\SpaceSync.exe"
 	nsExec::ExecToLog '"$INSTDIR\SpaceSync.exe" -installmanifest'
+	Pop $0
+	StrCmp $0 "0" +2
+		DetailPrint "SteamVR app registration will be completed when SpaceSync first runs with SteamVR (code $0)."
 	nsExec::ExecToLog '"$INSTDIR\SpaceSync.exe" -activatemultipledrivers'
+	Pop $0
+	StrCmp $0 "0" +2
+		DetailPrint "activateMultipleDrivers will be set when SpaceSync first runs with SteamVR (code $0)."
 
 SectionEnd
 
@@ -156,8 +186,26 @@ SectionEnd
 
 Section "Uninstall"
 
+	nsExec::Exec 'taskkill /IM SpaceSync.exe /F'
+	Pop $0
+
 	SetOutPath "$INSTDIR"
 	nsExec::ExecToLog '"$INSTDIR\SpaceSync.exe" -removemanifest'
+	Pop $0
+
+    Var /GLOBAL vrRuntimePath2
+	nsExec::ExecToStack '"$INSTDIR\SpaceSync.exe" -openvrpath'
+	Pop $0
+	Pop $vrRuntimePath2
+	StrCmp $0 "0" +3
+		StrCpy $vrRuntimePath2 ""
+		ReadRegStr $vrRuntimePath2 HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\Steam App 250820" "InstallLocation"
+	DetailPrint "VR runtime path: $vrRuntimePath2"
+	IfFileExists "$vrRuntimePath2\bin\win64\vrpathreg.exe" 0 +3
+		nsExec::ExecToLog '"$vrRuntimePath2\bin\win64\vrpathreg.exe" removedriver "$INSTDIR\driver"'
+		Pop $0
+
+	SetOutPath "$TEMP"
 
     Delete "$INSTDIR\LICENSE.txt"
     Delete "$INSTDIR\NOTICE.md"
@@ -176,13 +224,5 @@ Section "Uninstall"
     Delete "$SMPROGRAMS\${APP_NAME}.lnk"
 
     RMDir "$INSTDIR"
-
-    Var /GLOBAL vrRuntimePath2
-	nsExec::ExecToStack '"$INSTDIR\SpaceSync.exe" -openvrpath'
-	Pop $0
-	Pop $vrRuntimePath2
-	DetailPrint "VR runtime path: $vrRuntimePath"
-
-    ExecWait '"$vrRuntimePath2\bin\win64\vrpathreg.exe" removedriver "$INSTDIR\driver"'
 
 SectionEnd

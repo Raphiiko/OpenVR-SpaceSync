@@ -5,6 +5,7 @@
 #include "Calibration.h"
 #include "Configuration.h"
 #include "Lighthouse.h"
+#include "Localization.h"
 #include "Theme.h"
 #include "Version.h"
 
@@ -16,6 +17,9 @@
 #include <imgui.h>
 
 using namespace ui;
+
+float UserInterface::sLangZoneMinX = 0.0f;
+float UserInterface::sLangZoneMaxX = 0.0f;
 
 static const char* kCreditLine = "SpaceSync Beta by Shinyflvres. A modified version of OpenVR-SpaceOverride by Nyabsi (AGPL-3.0). Thanks to tach/pushrax for SpaceCalibrator.";
 
@@ -90,6 +94,9 @@ namespace
 
 void UserInterface::CollectDevices(VRState& state) const
 {
+	if (!vr::VRSystem())
+		return;
+
 	auto& trackingSystems = state.trackingSystems;
 	char buffer[vr::k_unMaxPropertyStringSize];
 
@@ -146,7 +153,13 @@ UserInterface::Status UserInterface::BuildStatus(const VRState& state) const
 			s.tracker = &device;
 	}
 
-	if (!CalCtx.validProfile)
+	if (vr::VRSystem() && !DriverConnected())
+	{
+		s.headline = "SpaceSync driver not loaded";
+		s.detail = "Restart SteamVR and enable the SpaceSync add-on";
+		s.color = P.danger;
+	}
+	else if (!CalCtx.validProfile)
 	{
 		s.headline = "No calibration yet";
 		s.detail = "Click the circle to calibrate";
@@ -310,10 +323,13 @@ UserInterface::WindowAction UserInterface::Render(bool runningInOverlay)
 
 		RenderWizard();
 		RenderConfirm();
+		RenderClosingOverlay();
 	}
 	ImGui::End();
 	ImGui::PopStyleVar(3);
 
+	if (closing_)
+		action = WindowAction::None;
 	return action;
 }
 
@@ -331,6 +347,42 @@ UserInterface::WindowAction UserInterface::RenderTitleBar()
 	ImVec2 ts = TextSize(F.semibold, 12.5f, "SpaceSync");
 	DrawText(dl, F.semibold, 12.5f, ImVec2(px(14.0f), (h - ts.y) * 0.5f), P.textTitle, "SpaceSync");
 
+	{
+		static const char* kLangNames[3] = { "English", "\xE6\x97\xA5\xE6\x9C\xAC\xE8\xAA\x9E", "\xE4\xB8\xAD\xE6\x96\x87" };
+		float lx = px(14.0f) + ts.x + px(10.0f);
+		ImVec2 ds = TextSize(F.regular, 12.0f, "-");
+		DrawText(dl, F.regular, 12.0f, ImVec2(lx, (h - ds.y) * 0.5f), P.textFooter, "-");
+		lx += ds.x + px(10.0f);
+		sLangZoneMinX = lx - px(4.0f);
+		for (int i = 0; i < 3; i++)
+		{
+			ImVec2 ns = TextSize(F.medium, 12.0f, kLangNames[i]);
+			char id[16];
+			std::snprintf(id, sizeof id, "##lang%d", i);
+			ImGui::SetCursorPos(ImVec2(lx - px(3.0f), (h - ns.y) * 0.5f - px(4.0f)));
+			ImGui::InvisibleButton(id, ImVec2(ns.x + px(6.0f), ns.y + px(8.0f)));
+			bool langHovered = ImGui::IsItemHovered();
+			if (langHovered)
+				ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+			bool active = (int)loc::Current() == i;
+			if (ImGui::IsItemClicked() && !active)
+			{
+				loc::SetLanguage((loc::Lang)i);
+				CalCtx.language = i;
+				SaveProfile(CalCtx);
+			}
+			DrawText(dl, active ? F.semibold : F.medium, 12.0f, ImVec2(lx, (h - ns.y) * 0.5f), active ? P.textStrong : (langHovered ? P.textTitle : P.textFooter), kLangNames[i]);
+			lx += ns.x + px(8.0f);
+			if (i < 2)
+			{
+				ImVec2 ss = TextSize(F.regular, 12.0f, "|");
+				DrawText(dl, F.regular, 12.0f, ImVec2(lx, (h - ss.y) * 0.5f), P.textFooter, "|");
+				lx += ss.x + px(8.0f);
+			}
+		}
+		sLangZoneMaxX = lx;
+	}
+
 	WindowAction action = WindowAction::None;
 	const float bw = px(TitleBarButtonWidth), bh = px(32.0f);
 	float x = W - px(4.0f) - bw * TitleBarButtonCount;
@@ -344,6 +396,8 @@ UserInterface::WindowAction UserInterface::RenderTitleBar()
 
 	for (const Btn& b : buttons)
 	{
+		if (overlayInput_)
+			break;
 		ImGui::SetCursorPos(ImVec2(x, by));
 		ImGui::InvisibleButton(b.id, ImVec2(bw, bh));
 		bool hovered = ImGui::IsItemHovered();
@@ -367,6 +421,23 @@ void UserInterface::RenderTabs()
 
 	dl->AddRectFilled(ImVec2(wp.x, wp.y + y0 + h - 1.0f), ImVec2(wp.x + W, wp.y + y0 + h), Col(P.border));
 
+	{
+		const bool vrRunning = vr::VRSystem() != nullptr;
+		const char* badgeText = vrRunning ? "SteamVR Running" : "SteamVR Not Running";
+		ImVec2 ts = TextSize(F.medium, 11.5f, badgeText);
+		const float dotD = px(7.0f);
+		const float padX = px(11.0f), padY = px(6.0f), gap = px(7.0f);
+		const float bw = padX * 2.0f + dotD + gap + ts.x;
+		const float bh = ts.y + 2.0f * padY;
+		float bx = wp.x + W - px(24.0f + PageInset()) - bw;
+		float by = wp.y + y0 + (h - 1.0f - bh) * 0.5f;
+		unsigned dotCol = vrRunning ? P.green : P.danger;
+		dl->AddRectFilled(ImVec2(bx, by), ImVec2(bx + bw, by + bh), Col(P.button), px(4.0f));
+		dl->AddRect(ImVec2(bx, by), ImVec2(bx + bw, by + bh), Col(P.borderButton), px(4.0f));
+		dl->AddCircleFilled(ImVec2(bx + padX + dotD * 0.5f, by + bh * 0.5f), dotD * 0.5f, Col(dotCol), 16);
+		DrawText(dl, F.medium, 11.5f, ImVec2(bx + padX + dotD + gap, by + padY), vrRunning ? P.textStrong : P.textMuted, badgeText);
+	}
+
 	ImGui::SetCursorPos(ImVec2(px(24.0f + PageInset()), y0));
 	if (TabItem("Calibration", tab_ == Tab::Calibration)) tab_ = Tab::Calibration;
 	ImGui::SameLine();
@@ -374,7 +445,7 @@ void UserInterface::RenderTabs()
 	ImGui::SameLine();
 	if (TabItem("Smoothing", tab_ == Tab::Smoothing)) tab_ = Tab::Smoothing;
 	ImGui::SameLine();
-	if (TabItem("Lighthouse", tab_ == Tab::Lighthouse)) tab_ = Tab::Lighthouse;
+	if (TabItem("Basestations", tab_ == Tab::Lighthouse)) tab_ = Tab::Lighthouse;
 	ImGui::SameLine();
 	if (TabItem("Settings", tab_ == Tab::Settings)) tab_ = Tab::Settings;
 
@@ -412,10 +483,11 @@ void UserInterface::RenderCalibration(const Status& status)
 	ImVec2 origin = ImGui::GetCursorScreenPos();
 	ImVec2 c(ImGui::GetWindowPos().x + W * 0.5f, origin.y + px(16.0f) + d * 0.5f);
 
+	const bool vrReady = vr::VRSystem() != nullptr;
 	ImGui::SetCursorScreenPos(ImVec2(c.x - d * 0.5f, c.y - d * 0.5f));
 	ImGui::InvisibleButton("##circle", ImVec2(d, d));
 	bool hovered = false;
-	if (ImGui::IsItemHovered())
+	if (vrReady && ImGui::IsItemHovered())
 	{
 		ImVec2 m = ImGui::GetIO().MousePos;
 		float dx = m.x - c.x, dy = m.y - c.y;
@@ -423,7 +495,7 @@ void UserInterface::RenderCalibration(const Status& status)
 		if (hovered)
 			ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
 	}
-	if (hovered && ImGui::IsItemClicked() && CalCtx.state == CalibrationState::None && !wizardOpen_)
+	if (hovered && ImGui::IsItemClicked() && vrReady && CalCtx.state == CalibrationState::None && !wizardOpen_)
 	{
 		StartCalibration();
 		wizardOpen_ = true;
@@ -441,7 +513,8 @@ void UserInterface::RenderCalibration(const Status& status)
 	y += px(28.0f + 14.0f);
 	DrawTextCentered(dl, F.semibold, 19.0f, ImVec2(c.x, y + px(9.5f)), P.textBright, calibrated ? "Calibrated" : "Calibrate");
 	y += px(19.0f + 6.0f);
-	DrawTextCentered(dl, F.regular, 12.5f, ImVec2(c.x, y + px(6.25f)), P.textMuted, calibrated ? "Click to calibrate again" : "Click to start");
+	DrawTextCentered(dl, F.regular, 12.5f, ImVec2(c.x, y + px(6.25f)), P.textMuted,
+		!vrReady ? "Start SteamVR to calibrate" : (calibrated ? "Click to calibrate again" : "Click to start"));
 	y += px(12.5f + 20.0f);
 	dl->AddRectFilled(ImVec2(c.x - px(75.0f), y), ImVec2(c.x + px(75.0f), y + 1.0f), Col(P.border));
 	y += 1.0f + px(16.0f);
@@ -480,7 +553,7 @@ void UserInterface::RenderCalibration(const Status& status)
 	{
 		VSpace(18.0f);
 		char warn[192];
-		std::snprintf(warn, sizeof warn, "The head tracker seems to have moved on the headset. The driver corrected %.1f deg / %.1f cm so far, a fresh calibration is the clean fix.",
+		std::snprintf(warn, sizeof warn, loc::tr("The head tracker seems to have moved on the headset. The driver corrected %.1f deg / %.1f cm so far, a fresh calibration is the clean fix."),
 			CalCtx.driverStatus.tiltDeg, CalCtx.driverStatus.translationDeviationM * 100.0);
 		ImVec2 ws = TextSize(F.regular, 13.0f, warn);
 		ImGui::SetCursorScreenPos(ImVec2(c.x - ws.x * 0.5f, ImGui::GetCursorScreenPos().y));
@@ -502,7 +575,7 @@ void UserInterface::RenderEdit(const Status& status)
 		InlineText(line1);
 		VSpace(5.0f);
 		std::vector<Segment> line2 = {
-			{ F.regular, 13.0f, status.color, status.headline + (status.detail.empty() ? "" : " via ") },
+			{ F.regular, 13.0f, status.color, std::string(loc::tr(status.headline.c_str())) + (status.detail.empty() ? "" : loc::tr(" via ")) },
 			{ F.mono, 12.5f, status.color, status.detail },
 		};
 		InlineText(line2);
@@ -660,36 +733,49 @@ void UserInterface::RenderLighthouse()
 	lighthouse::EnsureScanning();
 
 	TextWrapped(F.regular, 13.0f, P.textMuted, maxW,
-		"Turn your base stations on, into standby, or to sleep without a Lighthouse headset. "
-		"Works with V2 base stations over Bluetooth LE.");
+		"Turn your basestations on, into standby, or to sleep without a Lighthouse headset. "
+		"Works with V2 basestations over Bluetooth LE.");
 	VSpace(18.0f);
 
 	if (!lighthouse::Available())
 	{
 		Text(F.regular, 13.0f, P.yellow, "Bluetooth LE is not available on this PC.");
 		VSpace(8.0f);
-		TextWrapped(F.regular, 12.5f, P.textDim, maxW, "A Bluetooth 4.0+ adapter is required to control base stations.");
+		TextWrapped(F.regular, 12.5f, P.textDim, maxW, "A Bluetooth 4.0+ adapter is required to control basestations.");
 		return;
 	}
 
+	if (CheckboxRow("Dynamic Power",
+		"When enabled, SpaceSync wakes up all basestations as soon as it runs. When SpaceSync gets closed, it puts all basestations into standby.",
+		&CalCtx.dynamicBasestationPower, maxW))
+	{
+		lighthouse::SetAutoWake(CalCtx.dynamicBasestationPower);
+		if (CalCtx.dynamicBasestationPower)
+			lighthouse::RequestPowerAll(lighthouse::Power::Awake);
+		SaveProfile(CalCtx);
+	}
+	VSpace(18.0f);
+
 	auto stations = lighthouse::Stations();
 
-	SectionHeader("Base Stations", maxW);
+	SectionHeader("Basestations", maxW);
 	VSpace(10.0f);
 
 	if (stations.empty())
 	{
-		Text(F.regular, 12.5f, P.textDim, "Scanning for base stations...");
+		Text(F.regular, 12.5f, P.textDim, "Scanning for basestations...");
 		VSpace(8.0f);
 		TextWrapped(F.regular, 12.5f, P.textDim, maxW, "Make sure the stations have power and are within Bluetooth range.");
 		return;
 	}
 
-	char buf[128];
+	char buf[64];
 	for (const auto& s : stations)
 	{
+		ImGui::PushID((void*)(uintptr_t)s.address);
+
 		Text(F.semibold, 13.5f, P.textStrong, s.name.c_str());
-		ImGui::SameLine();
+		ImGui::SameLine(0.0f, px(14.0f));
 		const char* stateText = "Unknown";
 		unsigned stateColor = P.textDim;
 		switch (s.state)
@@ -700,66 +786,108 @@ void UserInterface::RenderLighthouse()
 		default: break;
 		}
 		Text(F.medium, 12.0f, stateColor, stateText);
-		ImGui::SameLine();
+		ImGui::SameLine(0.0f, px(14.0f));
 		std::snprintf(buf, sizeof buf, "%d dBm", s.rssi);
 		Text(F.regular, 11.5f, P.textFooter, buf);
-		VSpace(8.0f);
+		VSpace(10.0f);
 
 		ButtonOpts small;
 		small.fontSize = 12.5f;
-		small.padX = 14.0f;
+		small.padX = 16.0f;
 		small.padY = 7.0f;
 		small.enabled = !s.busy;
 
-		std::snprintf(buf, sizeof buf, "Wake##%llx", (unsigned long long)s.address);
-		if (Button(buf, small))
+		ButtonOpts primary = small;
+		primary.kind = ButtonKind::Primary;
+
+		if (Button("Wake", small))
 			lighthouse::RequestPower(s.address, lighthouse::Power::Awake);
-		ImGui::SameLine();
-		std::snprintf(buf, sizeof buf, "Standby##%llx", (unsigned long long)s.address);
-		if (Button(buf, small))
+		ImGui::SameLine(0.0f, px(10.0f));
+		if (Button("Standby", small))
 			lighthouse::RequestPower(s.address, lighthouse::Power::Standby);
-		ImGui::SameLine();
-		std::snprintf(buf, sizeof buf, "Sleep##%llx", (unsigned long long)s.address);
-		if (Button(buf, small))
+		ImGui::SameLine(0.0f, px(10.0f));
+		if (Button("Sleep", small))
 			lighthouse::RequestPower(s.address, lighthouse::Power::Sleep);
-		ImGui::SameLine();
-		std::snprintf(buf, sizeof buf, "Refresh##%llx", (unsigned long long)s.address);
-		ButtonOpts ghost = small;
-		ghost.kind = ButtonKind::Ghost;
-		if (Button(buf, ghost))
+		ImGui::SameLine(0.0f, px(18.0f));
+		if (Button("Refresh", primary))
 			lighthouse::RequestRefresh(s.address);
 		if (s.busy)
 		{
-			ImGui::SameLine();
+			ImGui::SameLine(0.0f, px(12.0f));
 			Text(F.regular, 12.0f, P.textDim, "working...");
 		}
 		if (!s.error.empty())
 		{
-			VSpace(4.0f);
+			VSpace(6.0f);
 			Text(F.regular, 12.0f, P.danger, s.error.c_str());
 		}
-		VSpace(14.0f);
+
+		ImGui::PopID();
+
+		VSpace(16.0f);
 		HLine(maxW);
-		VSpace(14.0f);
+		VSpace(16.0f);
 	}
 
-	SectionHeader("All Stations", maxW);
+	SectionHeader("All Basestations", maxW);
 	VSpace(10.0f);
 	{
-		ButtonOpts opts;
-		opts.fontSize = 13.0f;
 		if (Button("Wake all"))
 			lighthouse::RequestPowerAll(lighthouse::Power::Awake);
-		ImGui::SameLine();
+		ImGui::SameLine(0.0f, px(10.0f));
 		if (Button("Standby all"))
 			lighthouse::RequestPowerAll(lighthouse::Power::Standby);
-		ImGui::SameLine();
+		ImGui::SameLine(0.0f, px(10.0f));
 		if (Button("Sleep all"))
 			lighthouse::RequestPowerAll(lighthouse::Power::Sleep);
 	}
 	VSpace(10.0f);
 	TextWrapped(F.regular, 12.0f, P.textDim, maxW,
 		"Sleeping or standby stations stop tracking immediately. Standby wakes up faster than sleep; older station firmware only supports sleep.");
+}
+
+void UserInterface::RenderClosingOverlay()
+{
+	if (!closing_)
+		return;
+
+	const float W = ImGui::GetIO().DisplaySize.x;
+	const float H = ImGui::GetIO().DisplaySize.y;
+	ImDrawList* dl = ImGui::GetForegroundDrawList();
+
+	dl->AddRectFilled(ImVec2(0, 0), ImVec2(W, H), Col(P.pageBg, 0.97f));
+
+	std::string station;
+	for (const auto& s : lighthouse::Stations())
+	{
+		if (s.busy)
+		{
+			station = s.name;
+			break;
+		}
+	}
+	char line[256];
+	if (!station.empty())
+		std::snprintf(line, sizeof line, loc::tr("Setting basestation \"%s\" to standby..."), station.c_str());
+	else
+		std::snprintf(line, sizeof line, "%s", loc::tr("Setting basestations to standby..."));
+
+	const float cx = W * 0.5f;
+	const float cy = H * 0.5f;
+	const float r = px(16.0f);
+	const float spinnerY = cy - px(36.0f);
+	float a0 = (float)(ImGui::GetTime() * 5.0);
+	const int segments = 24;
+	dl->PathClear();
+	for (int i = 0; i <= segments; i++)
+	{
+		float a = a0 + (float)i / segments * 4.7f;
+		dl->PathLineTo(ImVec2(cx + std::cos(a) * r, spinnerY + std::sin(a) * r));
+	}
+	dl->PathStroke(Col(P.link), 0, px(3.0f));
+
+	DrawTextCentered(dl, F.semibold, 15.0f, ImVec2(cx, cy + px(6.0f)), P.textBright, line);
+	DrawTextCentered(dl, F.regular, 12.0f, ImVec2(cx, cy + px(30.0f)), P.textMuted, "The window closes when all basestations are in standby.");
 }
 
 void UserInterface::RenderSmoothing()
@@ -777,18 +905,7 @@ void UserInterface::RenderSmoothing()
 		"for example for dancing or full body recordings. Recommended: 25% - smooth movement while keeping latency minimal. "
 		"The higher the percentage, the more latency you get on fast movement. 0% turns it off.");
 	VSpace(12.0f);
-	{
-		double value = CalCtx.lighthouseSmoothing;
-		char label[32];
-		std::snprintf(label, sizeof label, "%.0f %%", value);
-		if (Slider("##lighthouseSmoothing", &value, 0.0, 100.0, maxW - 90.0f))
-		{
-			CalCtx.lighthouseSmoothing = value;
-			changed = true;
-		}
-		ImGui::SameLine();
-		Text(F.medium, 13.0f, P.textStrong, label);
-	}
+	changed |= SliderRow("Smoothing", "", &CalCtx.lighthouseSmoothing, 0.0, 100.0, "%.0f %%", maxW, 90.0f, 76.0f);
 	VSpace(24.0f);
 
 	SectionHeader("Headset Tracker", maxW);
@@ -941,6 +1058,10 @@ void UserInterface::RenderSettings()
 	if (CheckboxRow("Hide Head Tracker",
 		"Parks the tracker mounted on your headset far out of the way so games and SteamVR stop treating it as a device in your play space. Alignment is unaffected. Needs HMD Driven with a tracker, and pauses itself while you calibrate.",
 		&CalCtx.hideHeadTracker, colW) && CalCtx.validProfile)
+		SaveProfile(CalCtx);
+	if (CheckboxRow("Disable Voice Help",
+		"Disables the voice that tells you how to calibrate during the calibration.",
+		&CalCtx.disableVoiceHelp, colW))
 		SaveProfile(CalCtx);
 
 	float leftBottom = ImGui::GetCursorPosY();
@@ -1096,7 +1217,7 @@ void UserInterface::RenderWizard()
 			const int total = CalCtx.sequenceSteps > 0 ? CalCtx.sequenceSteps : CalCtx.SequenceStepCount();
 			const int step = std::min(total - 1, std::max(0, CalCtx.sequenceStep));
 			char buf[32];
-			std::snprintf(buf, sizeof buf, "Step %d of %d", step + 1, total);
+			std::snprintf(buf, sizeof buf, loc::tr("Step %d of %d"), step + 1, total);
 			counter = buf;
 			title = kSteps[step % kStepCount].title;
 			icon = kSteps[step % kStepCount].icon;

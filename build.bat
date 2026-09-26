@@ -94,6 +94,11 @@ cmake --build "%BUILD_DIR%"
 if errorlevel 1 goto :fail
 
 REM --- Collect files where installer.nsi expects them ----------------------------
+tasklist /FI "IMAGENAME eq SpaceSync.exe" 2>nul | findstr /I "SpaceSync.exe" >nul && (
+    echo [build] Closing running SpaceSync so files can be replaced ...
+    taskkill /IM SpaceSync.exe /F >nul 2>nul
+    timeout /t 1 /nobreak >nul
+)
 echo [build] Copying overlay files to bin\ ...
 if not exist "%ROOT%\bin" mkdir "%ROOT%\bin"
 copy /Y "%BUILD_DIR%\SpaceSync.exe" "%ROOT%\bin\" >nul || goto :fail

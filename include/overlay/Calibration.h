@@ -63,6 +63,9 @@ struct CalibrationContext
 	protocol::OneEuroParams headFilterParams = { 5.0, 0.8, 1.0 };
 	protocol::OneEuroParams driftFilterParams = { 3.0, 1.3, 0.6 };
 	double lighthouseSmoothing = 0.0;
+	bool dynamicBasestationPower = false;
+	bool disableVoiceHelp = false;
+	int language = 0;
 
 	vr::VRNotificationId notificationId = 0;
 
@@ -172,6 +175,7 @@ struct CalibrationContext
 extern CalibrationContext CalCtx;
 
 void InitCalibrator();
+bool DriverConnected();
 void CalibrationTick(double time);
 void StartCalibration();
 void CancelCalibration();   // abort a running calibration, restore the saved profile

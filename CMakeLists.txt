@@ -22,6 +22,8 @@ set(OpenVR_ROOT ${CMAKE_SOURCE_DIR}/3rdparty/OpenVR)
 
 find_package(OpenVR REQUIRED)
 
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+
 # Include rest of the CMake bindings
 add_subdirectory(3rdparty)
 
@@ -38,6 +40,7 @@ add_executable(SpaceSync
     "src/overlay/Theme.cpp"
     "src/overlay/TrackingPreview.cpp"
     "src/overlay/Lighthouse.cpp"
+    "src/overlay/Localization.cpp"
     "src/overlay/Sound.cpp"
     "src/overlay/EmbeddedFiles.cpp"
 )
@@ -80,6 +83,12 @@ target_link_libraries(SpaceSync
         windowsapp
 )
 
+if (WIN32)
+    set_target_properties(SpaceSync PROPERTIES WIN32_EXECUTABLE TRUE)
+    target_link_options(SpaceSync PRIVATE "/ENTRY:mainCRTStartup")
+    target_compile_options(SpaceSync PRIVATE "/utf-8")
+endif()
+
 add_library(driver_spacesync SHARED
     "src/driver/Main.cpp"
     "src/driver/ServerTrackedDeviceProvider.cpp"
@@ -102,5 +111,5 @@ target_link_libraries(driver_spacesync PRIVATE
     MinHook
 )
 
-set_property(TARGET driver_spacesync PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
+set_property(TARGET driver_spacesync PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded")
 set_target_properties(driver_spacesync PROPERTIES PREFIX "")

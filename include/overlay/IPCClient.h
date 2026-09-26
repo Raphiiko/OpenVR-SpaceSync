@@ -12,13 +12,16 @@ public:
 	~IPCClient();
 
 	void Connect();
+	bool TryConnect();
+	bool IsConnected() const { return pipe && pipe != INVALID_HANDLE_VALUE; }
 	protocol::Response SendBlocking(const protocol::Request &request);
 
 	void Send(const protocol::Request &request);
 	protocol::Response Receive();
 
 private:
-	void ConnectInternal();
+	void ConnectInternal(DWORD waitMs = 1000);
+	void Disconnect();
 
 	HANDLE pipe = INVALID_HANDLE_VALUE;
 };

@@ -3,6 +3,9 @@
 
 #include "Lighthouse.h"
 
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.Devices.Bluetooth.h>
@@ -10,7 +13,10 @@
 #include <winrt/Windows.Devices.Bluetooth.GenericAttributeProfile.h>
 #include <winrt/Windows.Storage.Streams.h>
 
+#include <chrono>
 #include <condition_variable>
+#include <cstdarg>
+#include <cstdio>
 #include <deque>
 #include <map>
 #include <mutex>
@@ -35,6 +41,42 @@ namespace lighthouse
 			int mode;
 		};
 
+		std::mutex logMutex;
+
+		std::string LogDirectory()
+		{
+			const char* localAppData = getenv("LOCALAPPDATA");
+			if (localAppData)
+			{
+				std::string dir = std::string(localAppData) + "\\SpaceSync";
+				CreateDirectoryA(dir.c_str(), NULL);
+				return dir;
+			}
+			char path[1024] = {};
+			GetModuleFileNameA(nullptr, path, sizeof path);
+			std::string dir(path);
+			size_t slash = dir.find_last_of("\\/");
+			return slash == std::string::npos ? std::string(".") : dir.substr(0, slash);
+		}
+
+		void Log(const char* fmt, ...)
+		{
+			std::lock_guard<std::mutex> lock(logMutex);
+			static std::string dir = LogDirectory();
+			FILE* f = fopen((dir + "\\lighthouse.log").c_str(), "a");
+			if (!f)
+				return;
+			SYSTEMTIME st;
+			GetLocalTime(&st);
+			fprintf(f, "[%02d:%02d:%02d.%03d] ", st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+			va_list args;
+			va_start(args, fmt);
+			vfprintf(f, fmt, args);
+			va_end(args);
+			fprintf(f, "\n");
+			fclose(f);
+		}
+
 		std::mutex mutex;
 		std::condition_variable wake;
 		std::deque<Command> queue;
@@ -42,6 +84,7 @@ namespace lighthouse
 		std::thread worker;
 		bool running = false;
 		bool scanning = false;
+		bool autoWake = false;
 		bool available = true;
 		std::string availabilityError;
 		BluetoothLEAdvertisementWatcher watcher{ nullptr };
@@ -64,6 +107,17 @@ namespace lighthouse
 				it->second.state = state;
 		}
 
+		template <typename TAsync>
+		static auto AwaitTimeout(TAsync const& op, int seconds)
+		{
+			if (op.wait_for(std::chrono::seconds(seconds)) != winrt::Windows::Foundation::AsyncStatus::Completed)
+			{
+				op.Cancel();
+				throw hresult_error(HRESULT_FROM_WIN32(ERROR_TIMEOUT));
+			}
+			return op.GetResults();
+		}
+
 		Power DecodePower(uint8_t raw)
 		{
 			if (raw == 0x00)
@@ -75,25 +129,24 @@ namespace lighthouse
 
 		GattCharacteristic FindPowerCharacteristic(BluetoothLEDevice& device)
 		{
-			auto services = device.GetGattServicesForUuidAsync(kControlService, BluetoothCacheMode::Uncached).get();
+			auto services = AwaitTimeout(device.GetGattServicesForUuidAsync(kControlService, BluetoothCacheMode::Uncached), 6);
 			if (services.Status() != GattCommunicationStatus::Success || services.Services().Size() == 0)
 				return nullptr;
 			for (auto const& service : services.Services())
 			{
-				auto chars = service.GetCharacteristicsForUuidAsync(kPowerCharacteristic, BluetoothCacheMode::Uncached).get();
+				auto chars = AwaitTimeout(service.GetCharacteristicsForUuidAsync(kPowerCharacteristic, BluetoothCacheMode::Uncached), 6);
 				if (chars.Status() == GattCommunicationStatus::Success && chars.Characteristics().Size() > 0)
 					return chars.Characteristics().GetAt(0);
 			}
 			return nullptr;
 		}
 
-		void Process(const Command& cmd)
+		const char* Attempt(const Command& cmd)
 		{
-			SetBusy(cmd.address, true, nullptr);
 			const char* failure = nullptr;
 			try
 			{
-				BluetoothLEDevice device = BluetoothLEDevice::FromBluetoothAddressAsync(cmd.address).get();
+				BluetoothLEDevice device = AwaitTimeout(BluetoothLEDevice::FromBluetoothAddressAsync(cmd.address), 6);
 				if (!device)
 					failure = "not reachable";
 				else
@@ -103,7 +156,7 @@ namespace lighthouse
 						failure = "no power control found";
 					else if (cmd.mode < 0)
 					{
-						auto read = ch.ReadValueAsync(BluetoothCacheMode::Uncached).get();
+						auto read = AwaitTimeout(ch.ReadValueAsync(BluetoothCacheMode::Uncached), 6);
 						if (read.Status() != GattCommunicationStatus::Success)
 							failure = "state read failed";
 						else
@@ -112,7 +165,11 @@ namespace lighthouse
 							if (buffer && buffer.Length() > 0)
 							{
 								DataReader reader = DataReader::FromBuffer(buffer);
-								SetState(cmd.address, DecodePower(reader.ReadByte()));
+								uint8_t raw = reader.ReadByte();
+								Power state = DecodePower(raw);
+								SetState(cmd.address, state);
+								Log("%012llx reports state 0x%02x (%s)", (unsigned long long)cmd.address, raw,
+									state == Power::Sleep ? "sleeping" : (state == Power::Standby ? "standby" : "awake"));
 							}
 						}
 					}
@@ -121,7 +178,7 @@ namespace lighthouse
 						uint8_t value = cmd.mode == (int)Power::Awake ? 0x01 : (cmd.mode == (int)Power::Standby ? 0x02 : 0x00);
 						DataWriter writer;
 						writer.WriteByte(value);
-						auto status = ch.WriteValueAsync(writer.DetachBuffer(), GattWriteOption::WriteWithResponse).get();
+						auto status = AwaitTimeout(ch.WriteValueAsync(writer.DetachBuffer(), GattWriteOption::WriteWithResponse), 6);
 						if (status != GattCommunicationStatus::Success)
 							failure = "write rejected (old firmware?)";
 						else
@@ -135,6 +192,28 @@ namespace lighthouse
 			{
 				failure = "bluetooth error";
 			}
+			return failure;
+		}
+
+		void Process(const Command& cmd)
+		{
+			SetBusy(cmd.address, true, nullptr);
+			const char* what = cmd.mode < 0 ? "refresh" : (cmd.mode == (int)Power::Awake ? "wake" : (cmd.mode == (int)Power::Standby ? "standby" : "sleep"));
+			const char* failure = nullptr;
+			for (int attempt = 0; attempt < 3; attempt++)
+			{
+				failure = Attempt(cmd);
+				if (!failure)
+					break;
+				Log("%012llx %s attempt %d failed: %s", (unsigned long long)cmd.address, what, attempt + 1, failure);
+				{
+					std::lock_guard<std::mutex> lock(mutex);
+					if (!running)
+						break;
+				}
+				std::this_thread::sleep_for(std::chrono::milliseconds(400));
+			}
+			Log("%012llx %s -> %s", (unsigned long long)cmd.address, what, failure ? failure : "ok");
 			SetBusy(cmd.address, false, failure);
 		}
 
@@ -171,6 +250,7 @@ namespace lighthouse
 			std::string name(w.begin(), w.end());
 			uint64_t address = args.BluetoothAddress();
 			bool fresh = false;
+			bool wake = false;
 			{
 				std::lock_guard<std::mutex> lock(mutex);
 				auto it = stations.find(address);
@@ -182,12 +262,19 @@ namespace lighthouse
 					s.rssi = args.RawSignalStrengthInDBm();
 					stations[address] = s;
 					fresh = true;
+					wake = autoWake;
 				}
 				else
 					it->second.rssi = args.RawSignalStrengthInDBm();
 			}
 			if (fresh)
-				RequestRefresh(address);
+			{
+				Log("found %s (%012llx, %d dBm)%s", name.c_str(), (unsigned long long)address, args.RawSignalStrengthInDBm(), wake ? ", auto-wake" : "");
+				if (wake)
+					RequestPower(address, Power::Awake);
+				else
+					RequestRefresh(address);
+			}
 		}
 	}
 
@@ -211,7 +298,17 @@ namespace lighthouse
 		}
 		wake.notify_all();
 		if (worker.joinable())
-			worker.join();
+		{
+			HANDLE h = (HANDLE)worker.native_handle();
+			DWORD rc = WaitForSingleObject(h, 10000);
+			if (rc == WAIT_OBJECT_0)
+				worker.join();
+			else
+			{
+				Log("shutdown: worker still blocked in bluetooth, detaching");
+				worker.detach();
+			}
+		}
 		try
 		{
 			if (scanning && watcher)
@@ -247,11 +344,13 @@ namespace lighthouse
 		{
 			watcher = created;
 			scanning = true;
+			Log("scanning started");
 		}
 		else
 		{
 			available = false;
 			availabilityError = "Bluetooth LE is not available on this system";
+			Log("bluetooth LE unavailable");
 		}
 	}
 
@@ -314,5 +413,106 @@ namespace lighthouse
 			queue.push_back({ address, -1 });
 		}
 		wake.notify_one();
+	}
+
+	void Note(const char* message)
+	{
+		Log("app: %s", message);
+	}
+
+	void BeginStandbyAll()
+	{
+		size_t known = 0;
+		{
+			std::lock_guard<std::mutex> lock(mutex);
+			known = stations.size();
+		}
+		Log("exit: standby initiated for %d station(s), window stays until done", (int)known);
+		RequestPowerAll(Power::Standby);
+	}
+
+	bool Idle()
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		if (!queue.empty())
+			return false;
+		for (auto const& kv : stations)
+			if (kv.second.busy)
+				return false;
+		return true;
+	}
+
+	void SetAutoWake(bool enabled)
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		autoWake = enabled;
+		Log("auto-wake %s", enabled ? "enabled" : "disabled");
+	}
+
+	void StandbyAllAndWait(int timeoutMs)
+	{
+		size_t known = 0;
+		{
+			std::lock_guard<std::mutex> lock(mutex);
+			known = stations.size();
+		}
+		int budget = (int)known * 6000;
+		if (budget < timeoutMs) budget = timeoutMs;
+		timeoutMs = budget;
+		Log("exit: sending standby to %d known station(s), budget %d ms", (int)known, timeoutMs);
+		RequestPowerAll(Power::Standby);
+		auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+		for (;;)
+		{
+			{
+				std::lock_guard<std::mutex> lock(mutex);
+				if (!running)
+					return;
+				bool pending = !queue.empty();
+				for (auto const& kv : stations)
+					pending = pending || kv.second.busy;
+				if (!pending)
+					break;
+			}
+			if (std::chrono::steady_clock::now() > deadline)
+			{
+				Log("exit: standby wait timed out");
+				return;
+			}
+			std::this_thread::sleep_for(std::chrono::milliseconds(50));
+		}
+		Log("exit: standby commands completed, verifying states");
+
+		{
+			std::lock_guard<std::mutex> lock(mutex);
+			if (!running)
+				return;
+			for (auto const& kv : stations)
+				queue.push_back({ kv.first, -1 });
+		}
+		wake.notify_one();
+		auto verifyDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+		for (;;)
+		{
+			{
+				std::lock_guard<std::mutex> lock(mutex);
+				if (!running)
+					return;
+				bool pending = !queue.empty();
+				for (auto const& kv : stations)
+					pending = pending || kv.second.busy;
+				if (!pending)
+				{
+					Log("exit: state verification done");
+					return;
+				}
+			}
+			if (std::chrono::steady_clock::now() > verifyDeadline)
+			{
+				Log("exit: state verification timed out");
+				return;
+			}
+			std::this_thread::sleep_for(std::chrono::milliseconds(50));
+		}
 	}
 }

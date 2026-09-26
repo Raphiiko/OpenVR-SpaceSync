@@ -3,6 +3,7 @@
 
 #include "Theme.h"
 #include "EmbeddedFiles.h"
+#include "Localization.h"
 
 #include <cmath>
 #include <cstdio>
@@ -62,12 +63,33 @@ namespace ui
 		cfg.OversampleV = 2;
 
 		const float base = FontPx(13.0f);
-		F.regular = io.Fonts->AddFontFromMemoryCompressedTTF(Manrope400_compressed_data, (int)Manrope400_compressed_size, base, &cfg);
-		F.medium = io.Fonts->AddFontFromMemoryCompressedTTF(Manrope500_compressed_data, (int)Manrope500_compressed_size, base, &cfg);
-		F.semibold = io.Fonts->AddFontFromMemoryCompressedTTF(Manrope600_compressed_data, (int)Manrope600_compressed_size, base, &cfg);
-		F.bold = io.Fonts->AddFontFromMemoryCompressedTTF(Manrope700_compressed_data, (int)Manrope700_compressed_size, base, &cfg);
-		F.mono = io.Fonts->AddFontFromMemoryCompressedTTF(JetBrainsMono400_compressed_data, (int)JetBrainsMono400_compressed_size, base, &cfg);
-		F.monoMedium = io.Fonts->AddFontFromMemoryCompressedTTF(JetBrainsMono500_compressed_data, (int)JetBrainsMono500_compressed_size, base, &cfg);
+
+		const char* jaCandidates[] = { "C:\\Windows\\Fonts\\YuGothM.ttc", "C:\\Windows\\Fonts\\YuGothR.ttc", "C:\\Windows\\Fonts\\meiryo.ttc" };
+		const char* scCandidates[] = { "C:\\Windows\\Fonts\\msyh.ttc", "C:\\Windows\\Fonts\\msyhl.ttc", "C:\\Windows\\Fonts\\simhei.ttf" };
+		const char* jaFont = nullptr;
+		const char* scFont = nullptr;
+		for (const char* p : jaCandidates) { FILE* f = fopen(p, "rb"); if (f) { fclose(f); jaFont = p; break; } }
+		for (const char* p : scCandidates) { FILE* f = fopen(p, "rb"); if (f) { fclose(f); scFont = p; break; } }
+
+		ImFontConfig cjk;
+		cjk.MergeMode = true;
+		cjk.PixelSnapH = false;
+		cjk.OversampleH = 2;
+		cjk.OversampleV = 2;
+
+		auto addWithCjk = [&](const void* data, int size) {
+			ImFont* font = io.Fonts->AddFontFromMemoryCompressedTTF(data, size, base, &cfg);
+			if (jaFont) io.Fonts->AddFontFromFileTTF(jaFont, base, &cjk);
+			if (scFont) io.Fonts->AddFontFromFileTTF(scFont, base, &cjk);
+			return font;
+		};
+
+		F.regular = addWithCjk(Manrope400_compressed_data, (int)Manrope400_compressed_size);
+		F.medium = addWithCjk(Manrope500_compressed_data, (int)Manrope500_compressed_size);
+		F.semibold = addWithCjk(Manrope600_compressed_data, (int)Manrope600_compressed_size);
+		F.bold = addWithCjk(Manrope700_compressed_data, (int)Manrope700_compressed_size);
+		F.mono = addWithCjk(JetBrainsMono400_compressed_data, (int)JetBrainsMono400_compressed_size);
+		F.monoMedium = addWithCjk(JetBrainsMono500_compressed_data, (int)JetBrainsMono500_compressed_size);
 		io.FontDefault = F.regular;
 
 		ImGuiStyle& style = ImGui::GetStyle();
@@ -125,6 +147,7 @@ namespace ui
 
 	ImVec2 TextSize(ImFont* font, float designSize, const char* text, float wrapDesignWidth)
 	{
+		text = loc::tr(text);
 		PushFont(font, designSize);
 		ImVec2 size = ImGui::CalcTextSize(text, nullptr, false, wrapDesignWidth > 0.0f ? px(wrapDesignWidth) : -1.0f);
 		PopFont();
@@ -133,6 +156,7 @@ namespace ui
 
 	void Text(ImFont* font, float designSize, unsigned rgb, const char* text)
 	{
+		text = loc::tr(text);
 		ImVec2 c = ImGui::GetCursorScreenPos();
 		ImGui::SetCursorScreenPos(ImVec2(std::floor(c.x + 0.5f), std::floor(c.y + 0.5f)));
 		PushFont(font, designSize);
@@ -144,6 +168,7 @@ namespace ui
 
 	void TextWrapped(ImFont* font, float designSize, unsigned rgb, float wrapDesignWidth, const char* text)
 	{
+		text = loc::tr(text);
 		ImVec2 c = ImGui::GetCursorScreenPos();
 		ImGui::SetCursorScreenPos(ImVec2(std::floor(c.x + 0.5f), std::floor(c.y + 0.5f)));
 		PushFont(font, designSize);
@@ -157,11 +182,13 @@ namespace ui
 
 	void DrawText(ImDrawList* dl, ImFont* font, float designSize, ImVec2 pos, unsigned rgb, const char* text)
 	{
+		text = loc::tr(text);
 		dl->AddText(font ? font : F.regular, FontPx(designSize), ImVec2(std::floor(pos.x + 0.5f), std::floor(pos.y + 0.5f)), Col(rgb), text);
 	}
 
 	void DrawTextCentered(ImDrawList* dl, ImFont* font, float designSize, ImVec2 center, unsigned rgb, const char* text)
 	{
+		text = loc::tr(text);
 		ImFont* f = font ? font : F.regular;
 		const float fs = FontPx(designSize);
 		ImVec2 size = f->CalcTextSizeA(fs, FLT_MAX, 0.0f, text);
@@ -373,6 +400,7 @@ namespace ui
 
 	static bool OptionRow(const char* label, const char* hint, bool isRadio, bool on, float designWidth)
 	{
+		hint = loc::tr(hint);
 		const float box = px(16.0f);
 		const float gap = px(11.0f);
 		const float padY = px(11.0f);

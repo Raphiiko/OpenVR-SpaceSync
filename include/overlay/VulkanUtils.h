@@ -64,13 +64,19 @@ static auto IsVulkanDeviceExtensionAvailable(const VkPhysicalDevice& physical_de
     return IsExtensionAvailable(extension_properties, extension);
 }
 
+inline bool g_skipOpenVRVulkanExtensions = false;
+
 static auto GetVulkanInstanceExtensionsRequiredByOpenVR() -> std::vector<std::string>
 {
     std::vector<std::string> result{};
 
-    if (!vr::VRCompositor())
+    if (g_skipOpenVRVulkanExtensions || !vr::VRCompositor())
     {
-        std::exit(EXIT_FAILURE);
+        result.push_back("VK_KHR_surface");
+#ifdef _WIN32
+        result.push_back("VK_KHR_win32_surface");
+#endif
+        return result;
     }
 
     uint32_t buffer_len = vr::VRCompositor()->GetVulkanInstanceExtensionsRequired(nullptr, 0);
@@ -100,8 +106,8 @@ static auto GetVulkanDeviceExtensionsRequiredByOpenVR(const VkPhysicalDevice& de
 {
     std::vector<std::string> result{};
 
-    if (!vr::VRCompositor()) {
-        std::exit(EXIT_FAILURE);
+    if (g_skipOpenVRVulkanExtensions || !vr::VRCompositor()) {
+        return result;
     }
 
     uint32_t buffer_len = vr::VRCompositor()->GetVulkanDeviceExtensionsRequired(device, nullptr, 0);

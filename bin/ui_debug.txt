@@ -1,0 +1,10 @@
+after vr-skip blocks
+after sound+lighthouse init
+after SDL_Init
+vk: got instance extensions (2)
+after vulkan init
+after imgui window init
+after calibrator+profile
+loop frame 0
+loop frame 1
+loop frame 2

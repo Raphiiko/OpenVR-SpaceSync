@@ -53,10 +53,41 @@ void IPCClient::Connect()
 	}
 }
 
+bool IPCClient::TryConnect()
+{
+	try
+	{
+		ConnectInternal(100);
+		return true;
+	}
+	catch (const std::runtime_error&)
+	{
+		Disconnect();
+		return false;
+	}
+}
+
+void IPCClient::Disconnect()
+{
+	if (pipe && pipe != INVALID_HANDLE_VALUE)
+		CloseHandle(pipe);
+	pipe = INVALID_HANDLE_VALUE;
+}
+
 protocol::Response IPCClient::SendBlocking(const protocol::Request &request)
 {
-	Send(request);
-	return Receive();
+	if (!IsConnected())
+		return protocol::Response(protocol::ResponseInvalid);
+	try
+	{
+		Send(request);
+		return Receive();
+	}
+	catch (const std::runtime_error&)
+	{
+		Disconnect();
+		return protocol::Response(protocol::ResponseInvalid);
+	}
 }
 
 void IPCClient::Send(const protocol::Request &request)
@@ -92,10 +123,10 @@ protocol::Response IPCClient::Receive()
 	return response;
 }
 
-void IPCClient::ConnectInternal()
+void IPCClient::ConnectInternal(DWORD waitMs)
 {
 	LPCTSTR pipeName = TEXT(SPACESYNC_PIPE_NAME);
-	WaitNamedPipe(pipeName, 1000);
+	WaitNamedPipe(pipeName, waitMs);
 	pipe = CreateFile(pipeName, GENERIC_READ | GENERIC_WRITE, 0, 0, OPEN_EXISTING, 0, 0);
 	if (pipe == INVALID_HANDLE_VALUE)
 	{

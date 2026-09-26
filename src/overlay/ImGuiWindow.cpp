@@ -167,6 +167,15 @@ auto ImGuiWindow::Show() -> void
     window_shown_ = true;
 }
 
+auto ImGuiWindow::ShowAndFocus() -> void
+{
+    SDL_ShowWindow(window_);
+    SDL_RestoreWindow(window_);
+    SDL_RaiseWindow(window_);
+
+    window_shown_ = true;
+}
+
 auto ImGuiWindow::SetMinimizedFromEvent(bool state) -> void
 {
     window_minimized_ = state;
@@ -179,17 +188,20 @@ auto ImGuiWindow::Hide() -> void
     window_shown_ = false;
 }
 
-auto ImGuiWindow::Draw(bool dashboardVisible) -> void
+auto ImGuiWindow::Draw(bool dashboardVisible, float overlayTopCrop) -> void
 {
     ImGui_ImplVulkan_NewFrame();
     ImGui_ImplSDL3_NewFrame();
-    ImGui_ImplOpenVR_NewFrame();
 
     ImGui::GetIO().DisplaySize = ImVec2(static_cast<float>(width_), static_cast<float>(height_));
 
+    ImGui_ImplOpenVR_SetTopCrop(overlayTopCrop);
+    ImGui_ImplOpenVR_NewFrame(dashboardVisible);
+
     ImGui::NewFrame();
 
-    UserInterface::WindowAction action = m_userInterface_.Render(dashboardVisible);
+    m_userInterface_.SetOverlayInput(dashboardVisible);
+    UserInterface::WindowAction action = m_userInterface_.Render(false);
 
     ImGui::Render();
 
@@ -199,8 +211,12 @@ auto ImGuiWindow::Draw(bool dashboardVisible) -> void
         SDL_MinimizeWindow(window_);
         break;
     case UserInterface::WindowAction::Close:
-        Hide();
+    {
+        SDL_Event quitEvent = {};
+        quitEvent.type = SDL_EVENT_QUIT;
+        SDL_PushEvent(&quitEvent);
         break;
+    }
     default:
         break;
     }
@@ -232,7 +248,8 @@ SDL_HitTestResult ImGuiWindow::HitTest(SDL_Window* window, const SDL_Point* area
     // Title bar drags the window, except over the buttons.
     const float titleH = UserInterface::TitleBarHeight * s;
     const float buttonsW = UserInterface::TitleBarButtonWidth * UserInterface::TitleBarButtonCount * s + 4.0f * s;
-    if (area->y >= 0 && area->y < titleH && area->x < self->width_ - buttonsW)
+    const bool overLangSwitch = area->x >= UserInterface::sLangZoneMinX && area->x <= UserInterface::sLangZoneMaxX;
+    if (area->y >= 0 && area->y < titleH && area->x < self->width_ - buttonsW && !overLangSwitch)
         return SDL_HITTEST_DRAGGABLE;
     return SDL_HITTEST_NORMAL;
 }

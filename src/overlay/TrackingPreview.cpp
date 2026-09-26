@@ -3,6 +3,7 @@
 
 #include "TrackingPreview.h"
 #include "Calibration.h"
+#include "Localization.h"
 #include "Theme.h"
 
 #include <openvr.h>
@@ -179,7 +180,7 @@ void TrackingPreview::Render(ImVec2 size)
 			{
 				label = TrackerRoleName(DeviceProp(sys, id, vr::Prop_ControllerType_String));
 				if (label.empty())
-					label = serial.size() >= 4 ? "Tracker " + serial.substr(serial.size() - 4) : "Tracker";
+					label = serial.size() >= 4 ? std::string(loc::tr("Tracker")) + " " + serial.substr(serial.size() - 4) : "Tracker";
 			}
 			markers.push_back({ pos, fwd, label, kTrackerCol, 4.2f });
 		}
@@ -264,8 +265,8 @@ void TrackingPreview::Render(ImVec2 size)
 		DrawText(dl, F.regular, 10.5f, ImVec2(s.x + px(9.0f), s.y - px(14.0f)), P.textMuted, m.label.c_str());
 	}
 
-	char counts[64];
-	std::snprintf(counts, sizeof counts, "%d devices tracked", (int)markers.size());
+	char counts[96];
+	std::snprintf(counts, sizeof counts, "%d %s", (int)markers.size(), loc::tr("devices tracked"));
 	DrawText(dl, F.regular, 10.5f, ImVec2(p0.x + px(14.0f), p1.y - px(24.0f)), P.textDim, counts);
 	{
 		const char* hint = "Drag to orbit  \xc2\xb7  Scroll to zoom";

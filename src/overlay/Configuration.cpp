@@ -2,6 +2,7 @@
 // Modified by Shinyflvres, 2026-08-23. Part of SpaceSync, a modified version of OpenVR-SpaceOverride by Nyabsi (AGPL-3.0). See NOTICE.md
 
 #include "Configuration.h"
+#include "Localization.h"
 
 #include <Windows.h>
 
@@ -105,6 +106,11 @@ static void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 	else
 		ctx.mountRefined = false;
 
+	if (obj["dynPower"].is<bool>())
+		ctx.dynamicBasestationPower = obj["dynPower"].get<bool>();
+	else
+		ctx.dynamicBasestationPower = false;
+
 	if (obj["lhSmoothing"].is<double>())
 	{
 		ctx.lighthouseSmoothing = obj["lhSmoothing"].get<double>();
@@ -118,6 +124,19 @@ static void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 		ctx.hideHeadTracker = obj["hideHeadTracker"].get<bool>();
 	else
 		ctx.hideHeadTracker = false;
+
+	if (obj["disableVoice"].is<bool>())
+		ctx.disableVoiceHelp = obj["disableVoice"].get<bool>();
+	else
+		ctx.disableVoiceHelp = false;
+
+	if (obj["language"].is<double>())
+		ctx.language = (int)obj["language"].get<double>();
+	else
+		ctx.language = 0;
+	if (ctx.language < 0 || ctx.language > 2)
+		ctx.language = 0;
+	loc::SetLanguage((loc::Lang)ctx.language);
 
 	if (obj["uiScale"].is<double>())
 		ctx.uiScale = (float)obj["uiScale"].get<double>();
@@ -219,9 +238,13 @@ static void WriteProfile(CalibrationContext &ctx, std::ostream &out)
 	profile["followSlam"].set<bool>(ctx.followSlamHmd);
 	profile["noHeadTracker"].set<bool>(ctx.noHeadTracker);
 	profile["mountRefined"].set<bool>(ctx.mountRefined);
+	profile["dynPower"].set<bool>(ctx.dynamicBasestationPower);
 	double lhSmoothing = ctx.lighthouseSmoothing;
 	profile["lhSmoothing"].set<double>(lhSmoothing);
 	profile["hideHeadTracker"].set<bool>(ctx.hideHeadTracker);
+	profile["disableVoice"].set<bool>(ctx.disableVoiceHelp);
+	double language = (double)ctx.language;
+	profile["language"].set<double>(language);
 	double uiScale = ctx.uiScale;
 	profile["uiScale"].set<double>(uiScale);
 

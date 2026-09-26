@@ -87,8 +87,20 @@ struct YawTranslationEstimator
 	double branchAge = 1e9;
 	bool lastSnapReverted = false;
 	uint32_t reverts = 0;
+	double rejectedMemorySeconds = 60.0;
+	double rejectedYaw = 0.0;
+	vr::HmdVector3d_t rejectedTranslation = { 0, 0, 0 };
+	double rejectedAge = 1e9;
+	uint32_t refusals = 0;
 
 	bool unstable() const { return unstableActive; }
+
+	bool isRejected(double yawNew, const vr::HmdVector3d_t& translationNew) const
+	{
+		return rejectedAge < rejectedMemorySeconds
+			&& std::fabs(wrapRad(yawNew - rejectedYaw)) < branchYawTolerance
+			&& vecNorm(vecSub(translationNew, rejectedTranslation)) < branchTranslationTolerance;
+	}
 
 	struct Cusum
 	{
@@ -157,6 +169,7 @@ struct YawTranslationEstimator
 		instabilityScore = 0.0;
 		unstableActive = false;
 		branchAge = 1e9;
+		rejectedAge = 1e9;
 		lastSnapReverted = false;
 		ringCount = 0;
 		ringNext = 0;
@@ -228,17 +241,11 @@ struct YawTranslationEstimator
 		vr::HmdVector3d_t residualTranslation = project(vecSub(translationFor(yaw, corrected, raw, scale), translation), raw, meanRaw);
 
 		branchAge += dt;
+		rejectedAge += dt;
 
 		vr::HmdVector3d_t residualTranslationRaw = vecSub(translationFor(yaw, corrected, raw, scale), translation);
-		double rawSpeed = dt > 0.0 ? vecNorm(vecSub(raw, lastRaw)) / dt : 0.0;
-		bool bigResidual = std::fabs(residualYaw) > instabilityYawGate || vecNorm(residualTranslationRaw) > instabilityTranslationGate;
-		if (bigResidual && rawSpeed < instabilitySpeedGate)
-			instabilityScore = instabilityScore + dt > 3.0 ? 3.0 : instabilityScore + dt;
-		else
-		{
-			instabilityScore -= dt * 0.4;
-			if (instabilityScore < 0.0) instabilityScore = 0.0;
-		}
+		instabilityScore -= dt * 0.4;
+		if (instabilityScore < 0.0) instabilityScore = 0.0;
 		if (instabilityScore > instabilityRise) unstableActive = true;
 		else if (instabilityScore < instabilityFall) unstableActive = false;
 
@@ -271,6 +278,14 @@ struct YawTranslationEstimator
 			}
 			double yawNew = std::atan2(resnapSin, resnapCos);
 			vr::HmdVector3d_t translationNew = vecScale(resnapSum, 1.0 / resnapCollected);
+			if (isRejected(yawNew, translationNew))
+			{
+				refusals++;
+				instabilityScore = 3.0;
+				unstableActive = true;
+				resnapCollected = 0;
+				return false;
+			}
 			bool reverted = applyBranchOrStore(yawNew, translationNew);
 			if (!reverted)
 			{
@@ -290,7 +305,14 @@ struct YawTranslationEstimator
 		}
 
 		bool bigInnovation = std::fabs(residualYaw) > resnapYawThreshold || vecNorm(residualTranslationRaw) > resnapTranslationThreshold;
-		if (!unstableActive && confidence >= resnapMinConfidence)
+		bool trusted = !unstableActive && quality >= resnapMinConfidence;
+		if (bigInnovation && !trusted)
+		{
+			resnapRun = 0;
+			lastRaw = raw;
+			return false;
+		}
+		if (trusted)
 			resnapRun = bigInnovation ? resnapRun + 1 : 0;
 		else
 			resnapRun = 0;
@@ -431,6 +453,7 @@ struct YawTranslationEstimator
 		ringCount = 0;
 		ringNext = 0;
 		branchAge = 1e9;
+		rejectedAge = 1e9;
 		resetDetectors();
 	}
 
@@ -479,6 +502,7 @@ struct YawTranslationEstimator
 		resnapCountdown = 0;
 		resnapCollected = 0;
 		branchAge = 1e9;
+		rejectedAge = 1e9;
 		resetDetectors();
 	}
 
@@ -651,6 +675,9 @@ private:
 			&& std::fabs(wrapRad(yawNew - branchYaw)) < branchYawTolerance
 			&& vecNorm(vecSub(translationNew, branchTranslation)) < branchTranslationTolerance)
 		{
+			rejectedYaw = yaw;
+			rejectedTranslation = translation;
+			rejectedAge = 0.0;
 			lastJumpYaw = wrapRad(branchYaw - yaw);
 			lastJumpTranslation = vecSub(branchTranslation, translation);
 			yaw = branchYaw;
@@ -674,6 +701,21 @@ private:
 		double yawNew;
 		vr::HmdVector3d_t translationNew, meanRawWindow;
 		int n = candidate(len, scale, snapYaw, yawNew, translationNew, &meanRawWindow);
+
+		if (isRejected(yawNew, translationNew))
+		{
+			lastJumpYaw = 0.0;
+			lastJumpTranslation = { 0, 0, 0 };
+			lastJumpFrames = n;
+			lastSnapReverted = false;
+			refusals++;
+			instabilityScore = 3.0;
+			unstableActive = true;
+			cooldown = cooldownSeconds;
+			yawDetector.reset();
+			translationDetector.reset();
+			return;
+		}
 
 		bool reverted = applyBranchOrStore(yawNew, translationNew);
 		if (!reverted)

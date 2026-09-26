@@ -28,8 +28,9 @@ public:
 
     auto Hide() -> void;
     auto Show() -> void;
+    auto ShowAndFocus() -> void;
     auto SetMinimizedFromEvent(bool state) -> void;
-    auto Draw(bool dashboardVisible) -> void;
+    auto Draw(bool dashboardVisible, float overlayTopCrop) -> void;
     auto Resize(VulkanRenderer*& renderer, int width, int height) -> void;
 
     auto Destroy(VulkanRenderer*& renderer) -> void;
@@ -46,4 +47,7 @@ private:
     bool window_shown_;
     bool window_minimized_;
     UserInterface m_userInterface_;
+
+public:
+    void SetClosing(bool closing) { m_userInterface_.SetClosing(closing); }
 };

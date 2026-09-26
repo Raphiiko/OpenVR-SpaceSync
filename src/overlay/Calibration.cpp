@@ -23,7 +23,12 @@ CalibrationContext CalCtx;
 
 void InitCalibrator()
 {
-	Driver.Connect();
+	Driver.TryConnect();
+}
+
+bool DriverConnected()
+{
+	return Driver.IsConnected();
 }
 
 struct Pose
@@ -791,6 +796,9 @@ static int coplanarRetries = 0;
 
 void StartCalibration()
 {
+	if (!vr::VRSystem())
+		return;
+
 	CalCtx.lastCalibrationOk = false;
 	CalCtx.state = CalibrationState::Begin;
 	CalCtx.wantedUpdateInterval = 0.0;
@@ -844,6 +852,17 @@ static void UpdateCalibrationSounds(CalibrationContext &ctx)
 	const int cycle = (int)(sizeof directions / sizeof directions[0]);
 	static_assert(cycle == CalibrationContext::SequenceCycle, "voice cues and wizard steps must line up");
 
+	if (ctx.disableVoiceHelp)
+	{
+		if (lastState != CalibrationState::None || lastStep != -1)
+		{
+			sound::Stop();
+			lastState = CalibrationState::None;
+			lastStep = -1;
+		}
+		return;
+	}
+
 	if (ctx.state == CalibrationState::Sampling)
 	{
 		if (ctx.sequenceStep != lastStep)
@@ -876,6 +895,14 @@ void CalibrationTick(double time)
 		return;
 
 	ctx.timeLastTick = time;
+
+	static double lastConnectAttempt = -1e9;
+	if (!Driver.IsConnected() && time - lastConnectAttempt >= 3.0)
+	{
+		lastConnectAttempt = time;
+		Driver.TryConnect();
+	}
+
 	vr::VRSystem()->GetDeviceToAbsoluteTrackingPose(vr::TrackingUniverseRawAndUncalibrated, 0.0f, ctx.devicePoses, vr::k_unMaxTrackedDeviceCount);
 	UpdateSequenceStep(ctx, time);
 	UpdateCalibrationSounds(ctx);
@@ -1132,6 +1159,9 @@ void CalibrationTick(double time)
 
 void LoadChaperoneBounds()
 {
+	if (!vr::VRChaperoneSetup())
+		return;
+
 	vr::VRChaperoneSetup()->RevertWorkingCopy();
 
 	uint32_t quadCount = 0;
@@ -1146,6 +1176,9 @@ void LoadChaperoneBounds()
 
 void ApplyChaperoneBounds()
 {
+	if (!vr::VRChaperoneSetup())
+		return;
+
 	vr::VRChaperoneSetup()->RevertWorkingCopy();
 	vr::VRChaperoneSetup()->SetWorkingCollisionBoundsInfo(&CalCtx.chaperone.geometry[0], CalCtx.chaperone.geometry.size());
 	vr::VRChaperoneSetup()->SetWorkingStandingZeroPoseToRawTrackingPose(&CalCtx.chaperone.standingCenter);

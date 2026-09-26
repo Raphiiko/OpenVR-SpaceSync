@@ -35,8 +35,12 @@ public:
 	static constexpr float TitleBarHeight = 40.0f;
 	static constexpr float TitleBarButtonWidth = 40.0f;
 	static constexpr int TitleBarButtonCount = 2;
+	static float sLangZoneMinX;
+	static float sLangZoneMaxX;
 
 	WindowAction Render(bool runningInOverlay);
+	void SetClosing(bool closing) { closing_ = closing; }
+	void SetOverlayInput(bool overlayInput) { overlayInput_ = overlayInput; }
 
 private:
 	enum class Tab { Calibration, Preview, Smoothing, Lighthouse, Settings };
@@ -65,9 +69,12 @@ private:
 	void RenderFooter();
 	void RenderWizard();
 	void RenderConfirm();
+	void RenderClosingOverlay();
 
 	Tab tab_ = Tab::Calibration;
 	TrackingPreview preview_;
+	bool closing_ = false;
+	bool overlayInput_ = false;
 	bool smoothingDirty_ = false;
 	bool editView_ = false;
 	double editStep_ = 0.1;

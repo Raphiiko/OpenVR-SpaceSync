@@ -20,6 +20,7 @@
 #include "imgui_impl_openvr.h"
 
 #include <openvr.h>
+#include <chrono>
 
 struct ImGui_ImplOpenVR_Data {
     uintptr_t handle;
@@ -27,6 +28,11 @@ struct ImGui_ImplOpenVR_Data {
     uint32_t height;
     bool keyboard_active;
     vr::HmdVector2_t mouse_scale;
+    float top_crop;
+    bool has_mouse;
+    ImVec2 last_mouse;
+    std::chrono::steady_clock::time_point last_mouse_time;
+    std::chrono::steady_clock::time_point last_desktop_time;
 
     ImGui_ImplOpenVR_Data() { memset((void*)this, 0, sizeof(*this)); }
 };
@@ -66,7 +72,10 @@ bool ImGui_ImplOpenVR_ProcessOverlayEvent(const vr::VREvent_t& event)
         {
             // OpenGL uses coordinate space Bottom Left == 0,0 where as Vulkan is Top Left == 0,0
             // So we need to flip the y-axis to get the correct mouse position data
-            io.AddMousePosEvent(event.data.mouse.x, io.DisplaySize.y - event.data.mouse.y);
+            bd->last_mouse = ImVec2(event.data.mouse.x, io.DisplaySize.y - event.data.mouse.y);
+            bd->has_mouse = true;
+            bd->last_mouse_time = std::chrono::steady_clock::now();
+            io.AddMousePosEvent(bd->last_mouse.x, bd->last_mouse.y);
             break;
         }
         case vr::VREvent_MouseButtonDown:
@@ -207,6 +216,30 @@ bool ImGui_ImplOpenVR_ProcessOverlayEvent(const vr::VREvent_t& event)
     return true;
 }
 
+void ImGui_ImplOpenVR_SetTopCrop(float pixels)
+{
+    ImGui_ImplOpenVR_Data* bd = ImGui_ImplOpenVR_GetBackendData();
+    if (bd)
+        bd->top_crop = pixels > 0.0f ? pixels : 0.0f;
+}
+
+void ImGui_ImplOpenVR_Detach()
+{
+    ImGui_ImplOpenVR_Data* bd = ImGui_ImplOpenVR_GetBackendData();
+    if (bd)
+    {
+        bd->handle = vr::k_ulOverlayHandleInvalid;
+        bd->keyboard_active = false;
+    }
+}
+
+void ImGui_ImplOpenVR_NoteDesktopMouse()
+{
+    ImGui_ImplOpenVR_Data* bd = ImGui_ImplOpenVR_GetBackendData();
+    if (bd)
+        bd->last_desktop_time = std::chrono::steady_clock::now();
+}
+
 void ImGui_ImplOpenVR_Shutdown()
 {
     ImGui_ImplOpenVR_Data* bd = ImGui_ImplOpenVR_GetBackendData();
@@ -216,7 +249,7 @@ void ImGui_ImplOpenVR_Shutdown()
     g_openvr_backend = nullptr;
 }
 
-void ImGui_ImplOpenVR_NewFrame()
+void ImGui_ImplOpenVR_NewFrame(bool overlayActive)
 {
     ImGui_ImplOpenVR_Data* bd = ImGui_ImplOpenVR_GetBackendData();
     IM_ASSERT(bd != nullptr && "Context or backend not initialized! Did you call ImGui_ImplOpenVR_Init()?");
@@ -227,14 +260,25 @@ void ImGui_ImplOpenVR_NewFrame()
         bd->keyboard_active = false;
     }
 
+    if (bd->handle == vr::k_ulOverlayHandleInvalid || !vr::VROverlay())
+        return;
+
     if (vr::VROverlay()->IsOverlayVisible(bd->handle) && !bd->keyboard_active && io.WantTextInput) {
         vr::VROverlay()->ShowKeyboardForOverlay(bd->handle, vr::k_EGamepadTextInputModeNormal, vr::k_EGamepadTextInputLineModeSingleLine, vr::KeyboardFlag_Minimal | vr::KeyboardFlag_HideDoneKey | vr::KeyboardFlag_ShowArrowKeys, "ImGui OpenVR Virtual Keyboard", 1, "", 0);
         bd->keyboard_active = true;
     }
 
-    if (bd->width > 0 && bd->height > 0) {
-        bd->mouse_scale = { (float)bd->width, (float)bd->height };
+    if (io.DisplaySize.x > 0.0f && io.DisplaySize.y > bd->top_crop) {
+        bd->mouse_scale = { io.DisplaySize.x, io.DisplaySize.y - bd->top_crop };
         vr::VROverlay()->SetOverlayMouseScale(bd->handle, &bd->mouse_scale);
+    }
+
+    if (overlayActive)
+    {
+        if (bd->has_mouse)
+            io.AddMousePosEvent(bd->last_mouse.x, bd->last_mouse.y);
+        else
+            io.AddMousePosEvent(-FLT_MAX, -FLT_MAX);
     }
 }
 

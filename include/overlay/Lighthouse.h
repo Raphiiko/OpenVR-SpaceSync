@@ -31,4 +31,9 @@ namespace lighthouse
 	void RequestPower(uint64_t address, Power mode);
 	void RequestPowerAll(Power mode);
 	void RequestRefresh(uint64_t address);
+	void SetAutoWake(bool enabled);
+	void StandbyAllAndWait(int timeoutMs);
+	void BeginStandbyAll();
+	bool Idle();
+	void Note(const char* message);
 }

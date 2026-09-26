@@ -15,6 +15,8 @@ find_package(Vulkan REQUIRED)
 # Make sure SDL is built static, not shared.
 set(SDL_STATIC ON)
 set(SDL_SHARED OFF)
+# GameInput.dll is not present on every Windows install; SDL must load it at runtime instead of importing it.
+set(HAVE_GAMEINPUT_LIB 0 CACHE INTERNAL "" FORCE)
 
 add_subdirectory(${SDL_ROOT} EXCLUDE_FROM_ALL)
 
