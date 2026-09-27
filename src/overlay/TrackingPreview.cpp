@@ -101,9 +101,9 @@ namespace
 	const unsigned kTrackerCol = 0x66d68f;
 	const unsigned kControllerCol = 0xe87ab8;
 	const unsigned kHmdCol = 0x7ec8f0;
-	const unsigned kGrid = 0x2c313c;
-	const unsigned kGridAxis = 0x3a4150;
-	const unsigned kViewportBg = 0x14161d;
+	const unsigned kGrid = 0x2c2c31;
+	const unsigned kGridAxis = 0x44444b;
+	const unsigned kViewportBg = 0x0e0e10;
 }
 
 void TrackingPreview::Render(ImVec2 size)

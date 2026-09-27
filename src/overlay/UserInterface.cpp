@@ -14,7 +14,10 @@
 #include <algorithm>
 #include <cstdio>
 #include <cmath>
+#include <cstring>
 #include <imgui.h>
+#include <imgui_internal.h>
+#include <SDL3/SDL.h>
 
 using namespace ui;
 
@@ -501,8 +504,9 @@ void UserInterface::RenderCalibration(const Status& status)
 		wizardOpen_ = true;
 	}
 
-	dl->AddCircleFilled(c, d * 0.5f, Col(hovered ? 0x14181e : P.inputBg), 96);
-	dl->AddCircle(c, d * 0.5f, Col(calibrated ? P.greenBorder : P.blueBorder), 96, 1.0f);
+	const float ringWidth = px(3.0f);
+	dl->AddCircleFilled(c, d * 0.5f - ringWidth * 0.5f, Col(hovered ? 0x131316 : P.inputBg), 128);
+	DrawGradientRing(dl, c, d * 0.5f, ringWidth);
 
 	// Text stack inside the circle
 	const float lineH = px(18.0f);  // 12px text with line-height 1.5
@@ -536,6 +540,7 @@ void UserInterface::RenderCalibration(const Status& status)
 	edit.enabled = calibrated;
 	ButtonOpts remove;
 	remove.enabled = calibrated;
+	remove.hoverBorder = P.dangerBorder;
 	float editW = TextSize(F.medium, 13.0f, "Edit Calibration").x + px(36.0f);
 	float removeW = TextSize(F.medium, 13.0f, "Remove Calibration").x + px(36.0f);
 	float total = editW + px(8.0f) + removeW;
@@ -727,6 +732,67 @@ void UserInterface::RenderPreview()
 	preview_.Render(ImVec2(avail.x, h));
 }
 
+static ImTextureData* LoadImageTexture(const char* file)
+{
+	const char* base = SDL_GetBasePath();
+	std::string path = std::string(base ? base : "") + "images\\" + file;
+	SDL_Surface* loaded = SDL_LoadPNG(path.c_str());
+	if (!loaded)
+		return nullptr;
+	SDL_Surface* rgba = SDL_ConvertSurface(loaded, SDL_PIXELFORMAT_RGBA32);
+	SDL_DestroySurface(loaded);
+	if (!rgba)
+		return nullptr;
+
+	const int target = 160;
+	while (rgba->h / 2 >= target)
+	{
+		SDL_Surface* half = SDL_ScaleSurface(rgba, rgba->w / 2, rgba->h / 2, SDL_SCALEMODE_LINEAR);
+		SDL_DestroySurface(rgba);
+		if (!half)
+			return nullptr;
+		rgba = half;
+	}
+	if (rgba->h != target)
+	{
+		int w = (int)std::lround((double)rgba->w * target / rgba->h);
+		SDL_Surface* sized = SDL_ScaleSurface(rgba, w, target, SDL_SCALEMODE_LINEAR);
+		SDL_DestroySurface(rgba);
+		if (!sized)
+			return nullptr;
+		rgba = sized;
+	}
+
+	ImTextureData* tex = IM_NEW(ImTextureData)();
+	tex->Create(ImTextureFormat_RGBA32, rgba->w, rgba->h);
+	for (int y = 0; y < rgba->h; y++)
+		std::memcpy(tex->GetPixelsAt(0, y), (const unsigned char*)rgba->pixels + (size_t)y * rgba->pitch, (size_t)rgba->w * 4);
+	SDL_DestroySurface(rgba);
+	ImGui::RegisterUserTexture(tex);
+	return tex;
+}
+
+struct StationImages
+{
+	ImTextureData* body = nullptr;
+	ImTextureData* on = nullptr;
+	ImTextureData* standby = nullptr;
+};
+
+static const StationImages& GetStationImages()
+{
+	static bool loaded = false;
+	static StationImages images;
+	if (!loaded)
+	{
+		loaded = true;
+		images.body = LoadImageTexture("Basestation 2.0.png");
+		images.on = LoadImageTexture("Basestation 2.0 On Layer.png");
+		images.standby = LoadImageTexture("Basestation 2.0 Standby Layer.png");
+	}
+	return images;
+}
+
 void UserInterface::RenderLighthouse()
 {
 	const float maxW = std::min(820.0f, PageDesignWidth());
@@ -770,9 +836,24 @@ void UserInterface::RenderLighthouse()
 	}
 
 	char buf[64];
+	const StationImages& images = GetStationImages();
+	ImTextureData* image = images.body;
 	for (const auto& s : stations)
 	{
 		ImGui::PushID((void*)(uintptr_t)s.address);
+
+		const ImVec2 rowStart = ImGui::GetCursorPos();
+		const float imageH = px(62.0f);
+		if (image)
+		{
+			const float imageW = imageH * (float)image->Width / (float)image->Height;
+			ImGui::Image(image->GetTexRef(), ImVec2(imageW, imageH));
+			ImTextureData* led = s.state == lighthouse::Power::Awake ? images.on : (s.state == lighthouse::Power::Standby ? images.standby : nullptr);
+			if (led)
+				ImGui::GetWindowDrawList()->AddImage(led->GetTexRef(), ImGui::GetItemRectMin(), ImGui::GetItemRectMax());
+			ImGui::SetCursorPos(ImVec2(rowStart.x + imageW + px(18.0f), rowStart.y));
+		}
+		ImGui::BeginGroup();
 
 		Text(F.semibold, 13.5f, P.textStrong, s.name.c_str());
 		ImGui::SameLine(0.0f, px(14.0f));
@@ -822,6 +903,14 @@ void UserInterface::RenderLighthouse()
 			Text(F.regular, 12.0f, P.danger, s.error.c_str());
 		}
 
+		ImGui::EndGroup();
+		if (image)
+		{
+			float missing = rowStart.y + imageH - ImGui::GetCursorPosY();
+			if (missing > 0.0f)
+				ImGui::Dummy(ImVec2(0.0f, missing));
+		}
+
 		ImGui::PopID();
 
 		VSpace(16.0f);
@@ -855,7 +944,7 @@ void UserInterface::RenderClosingOverlay()
 	const float H = ImGui::GetIO().DisplaySize.y;
 	ImDrawList* dl = ImGui::GetForegroundDrawList();
 
-	dl->AddRectFilled(ImVec2(0, 0), ImVec2(W, H), Col(P.pageBg, 0.97f));
+	dl->AddRectFilled(ImVec2(0, 0), ImVec2(W, H), Col(P.overlay, 0.97f));
 
 	std::string station;
 	for (const auto& s : lighthouse::Stations())

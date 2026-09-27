@@ -89,6 +89,16 @@ namespace lighthouse
 		std::string availabilityError;
 		BluetoothLEAdvertisementWatcher watcher{ nullptr };
 
+		struct PassiveInfo
+		{
+			std::chrono::steady_clock::time_point discovered;
+			std::chrono::steady_clock::time_point commanded;
+			Power commandedState = Power::Unknown;
+			bool refreshRequested = false;
+			int advertised = -1;
+		};
+		std::map<uint64_t, PassiveInfo> passive;
+
 		void SetBusy(uint64_t address, bool busy, const char* error)
 		{
 			std::lock_guard<std::mutex> lock(mutex);
@@ -182,7 +192,13 @@ namespace lighthouse
 						if (status != GattCommunicationStatus::Success)
 							failure = "write rejected (old firmware?)";
 						else
+						{
 							SetState(cmd.address, (Power)cmd.mode);
+							std::lock_guard<std::mutex> lock(mutex);
+							auto& info = passive[cmd.address];
+							info.commanded = std::chrono::steady_clock::now();
+							info.commandedState = (Power)cmd.mode;
+						}
 					}
 				}
 				if (device)
@@ -236,44 +252,97 @@ namespace lighthouse
 			uninit_apartment();
 		}
 
+		int AdvertisedPower(BluetoothLEAdvertisementReceivedEventArgs const& args)
+		{
+			for (auto const& data : args.Advertisement().ManufacturerData())
+			{
+				if (data.CompanyId() != 0x055D || data.Data().Length() < 7)
+					continue;
+				DataReader reader = DataReader::FromBuffer(data.Data());
+				uint8_t bytes[7];
+				for (auto& b : bytes)
+					b = reader.ReadByte();
+				return bytes[4];
+			}
+			return -1;
+		}
+
+		void ApplyAdvertisedPower(uint64_t address, int raw)
+		{
+			bool changed = false;
+			Power state = DecodePower((uint8_t)raw);
+			{
+				std::lock_guard<std::mutex> lock(mutex);
+				auto it = stations.find(address);
+				if (it == stations.end())
+					return;
+				auto& info = passive[address];
+				auto now = std::chrono::steady_clock::now();
+				bool recentCommand = info.commandedState != Power::Unknown && now - info.commanded < std::chrono::seconds(8);
+				if (it->second.busy || (recentCommand && state != info.commandedState))
+					return;
+				changed = info.advertised != raw;
+				info.advertised = raw;
+				it->second.state = state;
+			}
+			if (changed)
+				Log("%012llx advertises state 0x%02x (%s)", (unsigned long long)address, raw,
+					state == Power::Sleep ? "sleeping" : (state == Power::Standby ? "standby" : "awake"));
+		}
+
 		void OnAdvertisement(BluetoothLEAdvertisementWatcher const&, BluetoothLEAdvertisementReceivedEventArgs const& args)
 		{
-			hstring localName = args.Advertisement().LocalName();
-			if (localName.size() < 5)
-				return;
-			std::wstring w(localName.c_str());
-			if (w.compare(0, 4, L"LHB-") != 0)
-				return;
-			if (w == L"LHB-00000000")
-				return;
-
-			std::string name(w.begin(), w.end());
 			uint64_t address = args.BluetoothAddress();
+			int advertised = AdvertisedPower(args);
+
+			hstring localName = args.Advertisement().LocalName();
+			std::wstring w(localName.c_str());
+			bool named = localName.size() >= 5 && w.compare(0, 4, L"LHB-") == 0 && w != L"LHB-00000000";
+
 			bool fresh = false;
 			bool wake = false;
+			bool refresh = false;
+			std::string name(w.begin(), w.end());
 			{
 				std::lock_guard<std::mutex> lock(mutex);
 				auto it = stations.find(address);
 				if (it == stations.end())
 				{
+					if (!named)
+						return;
 					Station s;
 					s.address = address;
 					s.name = name;
 					s.rssi = args.RawSignalStrengthInDBm();
 					stations[address] = s;
+					passive[address].discovered = std::chrono::steady_clock::now();
 					fresh = true;
 					wake = autoWake;
 				}
 				else
+				{
 					it->second.rssi = args.RawSignalStrengthInDBm();
+					auto& info = passive[address];
+					if (it->second.state == Power::Unknown && advertised < 0 && !info.refreshRequested && !it->second.busy
+						&& std::chrono::steady_clock::now() - info.discovered > std::chrono::seconds(3))
+					{
+						info.refreshRequested = true;
+						refresh = true;
+					}
+				}
 			}
+			if (advertised >= 0)
+				ApplyAdvertisedPower(address, advertised);
 			if (fresh)
 			{
 				Log("found %s (%012llx, %d dBm)%s", name.c_str(), (unsigned long long)address, args.RawSignalStrengthInDBm(), wake ? ", auto-wake" : "");
 				if (wake)
 					RequestPower(address, Power::Awake);
-				else
-					RequestRefresh(address);
+			}
+			if (refresh)
+			{
+				Log("%012llx sends no power state in its advertisement, reading it over GATT", (unsigned long long)address);
+				RequestRefresh(address);
 			}
 		}
 	}

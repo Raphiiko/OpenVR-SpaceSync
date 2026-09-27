@@ -183,6 +183,25 @@ static void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 	if (obj["calibration_speed"].is<double>())
 		ctx.calibrationSpeed = (CalibrationContext::Speed)(int) obj["calibration_speed"].get<double>();
 
+	ctx.tiltHistory.clear();
+	if (obj["tiltHistory"].is<picojson::array>())
+	{
+		for (auto &entry : obj["tiltHistory"].get<picojson::array>())
+		{
+			if (!entry.is<picojson::array>())
+				continue;
+			auto &v = entry.get<picojson::array>();
+			if (v.size() != 3 || !v[0].is<double>() || !v[1].is<double>() || !v[2].is<double>())
+				continue;
+			Eigen::Vector3d g(v[0].get<double>(), v[1].get<double>(), v[2].get<double>());
+			if (g.norm() > 0.5)
+				ctx.tiltHistory.push_back(g.normalized());
+		}
+	}
+	ctx.tiltFingerprint = obj["tiltFingerprint"].is<std::string>() ? obj["tiltFingerprint"].get<std::string>() : std::string();
+	ctx.tiltSessionEntry = -1;
+	ctx.tiltStepsRecorded = 0;
+
 	if (obj["chaperone"].is<picojson::object>())
 	{
 		auto chaperone = obj["chaperone"].get<picojson::object>();
@@ -276,6 +295,18 @@ static void WriteProfile(CalibrationContext &ctx, std::ostream &out)
 
 	double speed = (int) ctx.calibrationSpeed;
 	profile["calibration_speed"].set<double>(speed);
+
+	picojson::array tiltHistory;
+	for (auto &g : ctx.tiltHistory)
+	{
+		picojson::array v;
+		v.push_back(picojson::value(g.x()));
+		v.push_back(picojson::value(g.y()));
+		v.push_back(picojson::value(g.z()));
+		tiltHistory.push_back(picojson::value(v));
+	}
+	profile["tiltHistory"].set<picojson::array>(tiltHistory);
+	profile["tiltFingerprint"].set<std::string>(ctx.tiltFingerprint);
 
 	if (ctx.chaperone.valid)
 	{

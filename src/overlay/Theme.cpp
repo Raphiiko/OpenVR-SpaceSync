@@ -5,6 +5,8 @@
 #include "EmbeddedFiles.h"
 #include "Localization.h"
 
+#include <imgui_internal.h>
+
 #include <cmath>
 #include <cstdio>
 #include <cfloat>
@@ -248,6 +250,66 @@ namespace ui
 		}
 	}
 
+	static unsigned LerpRgb(unsigned a, unsigned b, float t)
+	{
+		auto ch = [&](int shift) {
+			float x = (float)((a >> shift) & 0xff), y = (float)((b >> shift) & 0xff);
+			int v = (int)std::lround(x + (y - x) * t);
+			return (unsigned)std::min(255, std::max(0, v)) << shift;
+		};
+		return ch(16) | ch(8) | ch(0);
+	}
+
+	static unsigned RingColor(float t)
+	{
+		t = std::min(1.0f, std::max(0.0f, t));
+		for (int i = 0; i < 4; i++)
+		{
+			if (t <= P.ringStops[i + 1])
+			{
+				float span = P.ringStops[i + 1] - P.ringStops[i];
+				return LerpRgb(P.ring[i], P.ring[i + 1], span > 0.0f ? (t - P.ringStops[i]) / span : 0.0f);
+			}
+		}
+		return P.ring[4];
+	}
+
+	void DrawGradientRing(ImDrawList* dl, ImVec2 c, float outerRadius, float thickness)
+	{
+		const int n = 256;
+		const float feather = 1.0f;
+		const float radius[4] = { outerRadius + feather * 0.5f, outerRadius - feather * 0.5f, outerRadius - thickness + feather * 0.5f, outerRadius - thickness - feather * 0.5f };
+		const float alpha[4] = { 0.0f, 1.0f, 1.0f, 0.0f };
+		const float lineLength = 2.0f * outerRadius * 1.41421356f;
+		const ImVec2 dir(-0.70710678f, 0.70710678f);
+		const ImVec2 uv = dl->_Data->TexUvWhitePixel;
+
+		dl->PrimReserve(n * 18, n * 4);
+		const unsigned int base = dl->_VtxCurrentIdx;
+		for (int i = 0; i < n; i++)
+		{
+			float a = 6.28318531f * (float)i / (float)n;
+			ImVec2 u(std::cos(a), std::sin(a));
+			for (int k = 0; k < 4; k++)
+			{
+				ImVec2 pos(c.x + u.x * radius[k], c.y + u.y * radius[k]);
+				float t = 0.5f + ((pos.x - c.x) * dir.x + (pos.y - c.y) * dir.y) / lineLength;
+				dl->PrimWriteVtx(pos, uv, Col(RingColor(t), alpha[k]));
+			}
+		}
+		for (int i = 0; i < n; i++)
+		{
+			int j = (i + 1) % n;
+			for (int b = 0; b < 3; b++)
+			{
+				ImDrawIdx v0 = (ImDrawIdx)(base + i * 4 + b), v1 = (ImDrawIdx)(base + i * 4 + b + 1);
+				ImDrawIdx w0 = (ImDrawIdx)(base + j * 4 + b), w1 = (ImDrawIdx)(base + j * 4 + b + 1);
+				dl->PrimWriteIdx(v0); dl->PrimWriteIdx(w0); dl->PrimWriteIdx(w1);
+				dl->PrimWriteIdx(v0); dl->PrimWriteIdx(w1); dl->PrimWriteIdx(v1);
+			}
+		}
+	}
+
 	bool HoverHand()
 	{
 		if (ImGui::IsItemHovered())
@@ -301,12 +363,12 @@ namespace ui
 		{
 		case ButtonKind::Secondary:
 			dl->AddRectFilled(p, ImVec2(p.x + w, p.y + h), Col(hovered ? P.buttonHover : P.button), r);
-			dl->AddRect(p, ImVec2(p.x + w, p.y + h), Col(o.enabled ? P.borderButton : P.borderStrong), r);
+			dl->AddRect(p, ImVec2(p.x + w, p.y + h), Col(!o.enabled ? P.borderStrong : (hovered && o.hoverBorder ? o.hoverBorder : P.borderButton)), r);
 			textColor = o.enabled ? P.text : P.textDisabled;
 			break;
 		case ButtonKind::Primary:
 			dl->AddRectFilled(p, ImVec2(p.x + w, p.y + h), Col(hovered ? P.accentHover : P.accent), r);
-			textColor = 0xffffff;
+			textColor = P.textOnAccent;
 			break;
 		case ButtonKind::Danger:
 			dl->AddRectFilled(p, ImVec2(p.x + w, p.y + h), Col(hovered ? P.dangerHover : P.danger), r);
@@ -352,7 +414,7 @@ namespace ui
 		if (*value)
 		{
 			dl->AddRectFilled(b0, b1, Col(P.accent), r);
-			DrawIcon(dl, Icon::Check, ImVec2((b0.x + b1.x) * 0.5f, cy), 11.0f, Col(0xffffff), 1.8f);
+			DrawIcon(dl, Icon::Check, ImVec2((b0.x + b1.x) * 0.5f, cy), 11.0f, Col(P.textOnAccent), 1.8f);
 		}
 		else
 		{
@@ -443,7 +505,7 @@ namespace ui
 			if (on)
 			{
 				dl->AddRectFilled(b0, b1, Col(P.accent), r);
-				DrawIcon(dl, Icon::Check, ImVec2((b0.x + b1.x) * 0.5f, cy), 11.0f, Col(0xffffff), 1.8f);
+				DrawIcon(dl, Icon::Check, ImVec2((b0.x + b1.x) * 0.5f, cy), 11.0f, Col(P.textOnAccent), 1.8f);
 			}
 			else
 			{
@@ -562,7 +624,7 @@ namespace ui
 		float r = px(4.0f);
 		dl->AddRectFilled(p, ImVec2(p.x + size.x, p.y + size.y), Col(active ? P.accent : (hovered ? P.buttonHover : P.button)), r);
 		dl->AddRect(p, ImVec2(p.x + size.x, p.y + size.y), Col(active ? P.accent : P.borderButton), r);
-		DrawText(dl, font, fontSize, ImVec2(p.x + px(10.0f), p.y + px(5.0f)), active ? 0xffffff : P.textMuted, label);
+		DrawText(dl, font, fontSize, ImVec2(p.x + px(10.0f), p.y + px(5.0f)), active ? P.textOnAccent : P.textMuted, label);
 		return clicked;
 	}
 

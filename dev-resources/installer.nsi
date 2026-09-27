@@ -139,6 +139,8 @@ Section "Install" SecInstall
     File "${FILES_DIR}\icon.png"
     SetOutPath "$INSTDIR\sound"
     File "${FILES_DIR}\sound\*.wav"
+    SetOutPath "$INSTDIR\images"
+    File "${FILES_DIR}\images\*.png"
 
     SetOutPath "$INSTDIR\driver"
     File /r "${DRIVER_DIR}\*"
@@ -217,6 +219,8 @@ Section "Uninstall"
     Delete "$INSTDIR\icon.png"
     Delete "$INSTDIR\sound\*.wav"
     RMDir "$INSTDIR\sound"
+    Delete "$INSTDIR\images\*.png"
+    RMDir "$INSTDIR\images"
     RMDir /r "$INSTDIR\driver"
 
     DeleteRegKey HKLM "Software\${APP_NAME}"

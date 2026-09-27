@@ -46,6 +46,10 @@ struct CalibrationContext
 	protocol::DriverStatus driverStatus = {};
 	bool refinementDirty = false;
 	bool mountRefined = false;
+	std::vector<Eigen::Vector3d> tiltHistory;
+	std::string tiltFingerprint;
+	int tiltSessionEntry = -1;
+	uint32_t tiltStepsRecorded = 0;
 	double timeRefinementSaved = 0.0;
 	double timeLastTick = 0, timeLastScan = 0;
 	double wantedUpdateInterval = 1.0;
@@ -104,6 +108,10 @@ struct CalibrationContext
 		relativeTranslation = { 0, 0, 0 };
 		validRelativeOffset = false;
 		mountRefined = false;
+		tiltHistory.clear();
+		tiltFingerprint.clear();
+		tiltSessionEntry = -1;
+		tiltStepsRecorded = 0;
 		targetTrackingSystem = "";
 		hmdSerial = "";
 		trackerSerial = "";

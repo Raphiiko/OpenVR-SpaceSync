@@ -7,11 +7,13 @@
 #include "OneEuroFilter.h"
 #include "AlignmentEstimator.h"
 #include "KalmanFilter.h"
+#include "LatencyPredictor.h"
 
 #include <openvr_driver.h>
 
 #include <atomic>
 #include <cmath>
+#include <memory>
 #include <mutex>
 
 class ServerTrackedDeviceProvider : public vr::IServerTrackedDeviceProvider
@@ -73,6 +75,42 @@ private:
 	}
 
 	bool DetectHmdFrameJump(const vr::DriverPose_t &pose, double &jumpYaw, vr::HmdVector3d_t &jumpTranslation);
+	bool DetectHmdKinematicJump(const vr::DriverPose_t &pose, const vr::HmdQuaternion_t &rawRotation, const double (&rawPosition)[3], double hmdTime);
+	void CompensateLatency(uint32_t openVRID, vr::DriverPose_t &pose);
+
+	std::unique_ptr<latency::Device> predictors[vr::k_unMaxTrackedDeviceCount];
+	std::atomic<double> latencyTauPos{ -1.0 };
+	std::atomic<double> latencyTauRot{ -1.0 };
+	std::atomic<int> angularFrameDevice{ -1 };
+	std::atomic<int> velocityFrameDevice{ -1 };
+
+	struct HmdKinematics
+	{
+		bool primed = false;
+		double time = 0.0;
+		vr::HmdQuaternion_t rotation = { 1, 0, 0, 0 };
+		vr::HmdVector3d_t position = { 0, 0, 0 };
+		vr::HmdVector3d_t velocity = { 0, 0, 0 };
+		double angularSpeed = 0.0;
+		double lastLog = 0.0;
+
+		void reset() { primed = false; }
+	} hmdKinematics;
+	double lastHmdJumpTime = -1e9;
+
+	struct Reacquire
+	{
+		bool lost = false;
+		double lossStart = 0.0;
+		double hold = 0.0;
+		bool waived = false;
+
+		void reset() { lost = false; lossStart = 0.0; hold = 0.0; waived = false; }
+	} reacquire;
+
+	bool tiltSeedValid = false;
+	vr::HmdVector3d_t tiltSeed = { 0, 0, 0 };
+	uint32_t tiltStepsSession = 0;
 
 	align::ClockAligner clock;
 	double clockLogTime = 0.0;

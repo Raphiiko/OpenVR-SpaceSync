@@ -14,6 +14,9 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstdlib>
+#include <map>
+#include <sstream>
 
 #include <Dense>
 
@@ -53,6 +56,7 @@ struct Sample
 {
 	Pose ref, target;
 	bool valid;
+	double time = 0.0;
 	Sample() : valid(false) { }
 	Sample(Pose ref, Pose target) : valid(true), ref(ref), target(target) { }
 };
@@ -267,7 +271,7 @@ static const double ScaleSpreadThreshold = 0.5;
 static const double MinCalibratedScale = 0.97;
 static const double MaxCalibratedScale = 1.03;
 
-Eigen::Vector3d CalibrateTranslation(const std::vector<Sample>& samples, const Eigen::Matrix3d& rotation, double scale)
+static Eigen::Vector3d SolveTranslation(const std::vector<Sample>& samples, const Eigen::Matrix3d& rotation, double scale)
 {
 	std::vector<std::pair<Eigen::Vector3d, Eigen::Matrix3d>> deltas;
 
@@ -309,13 +313,187 @@ Eigen::Vector3d CalibrateTranslation(const std::vector<Sample>& samples, const E
 		}
 	}
 
-	Eigen::Vector3d trans = coefficients.bdcSvd(Eigen::ComputeThinU | Eigen::ComputeThinV).solve(constants);
+	return coefficients.bdcSvd(Eigen::ComputeThinU | Eigen::ComputeThinV).solve(constants);
+}
+
+Eigen::Vector3d CalibrateTranslation(const std::vector<Sample>& samples, const Eigen::Matrix3d& rotation, double scale)
+{
+	Eigen::Vector3d trans = SolveTranslation(samples, rotation, scale);
 	auto transcm = trans * 100.0;
 
 	char buf[256];
 	snprintf(buf, sizeof buf, "Calibrated translation x=%.2f y=%.2f z=%.2f\n", transcm[0], transcm[1], transcm[2]);
 	CalCtx.Log(buf);
 	return transcm;
+}
+
+static Eigen::Matrix3d ExpRotation(const Eigen::Vector3d& v)
+{
+	double a = v.norm();
+	if (a < 1e-12)
+		return Eigen::Matrix3d::Identity();
+	return Eigen::AngleAxisd(a, v / a).toRotationMatrix();
+}
+
+static void TargetRates(const std::vector<Sample>& samples, std::vector<Eigen::Vector3d>& omega, std::vector<Eigen::Vector3d>& velocity)
+{
+	omega.assign(samples.size(), Eigen::Vector3d::Zero());
+	velocity.assign(samples.size(), Eigen::Vector3d::Zero());
+	for (size_t i = 0; i < samples.size(); i++)
+	{
+		size_t a = i > 0 ? i - 1 : i, b = i + 1 < samples.size() ? i + 1 : i;
+		double dt = samples[b].time - samples[a].time;
+		if (dt <= 1e-4 || dt > 0.3)
+			continue;
+		omega[i] = RotationVector(samples[b].target.rot * samples[a].target.rot.transpose()) / dt;
+		velocity[i] = (samples[b].target.trans - samples[a].target.trans) / dt;
+	}
+}
+
+static std::vector<Sample> ShiftTargets(const std::vector<Sample>& samples, const std::vector<Eigen::Vector3d>& omega, const std::vector<Eigen::Vector3d>& velocity, double tauRot, double tauPos)
+{
+	std::vector<Sample> out = samples;
+	for (size_t i = 0; i < out.size(); i++)
+	{
+		out[i].target.rot = ExpRotation(omega[i] * tauRot) * out[i].target.rot;
+		out[i].target.trans += velocity[i] * tauPos;
+	}
+	return out;
+}
+
+static bool RotationFit(const std::vector<Sample>& samples, Eigen::Matrix3d& rot, double& residual)
+{
+	std::vector<DSample> deltas;
+	for (size_t i = 0; i < samples.size(); i++)
+		for (size_t j = 0; j < i; j++)
+		{
+			auto delta = DeltaRotationSamples(samples[i], samples[j]);
+			if (delta.valid)
+				deltas.push_back(delta);
+		}
+	if (deltas.size() < 10)
+		return false;
+
+	Eigen::Matrix3d cross = Eigen::Matrix3d::Zero();
+	for (auto& d : deltas)
+		cross += d.ref * d.target.transpose();
+	Eigen::JacobiSVD<Eigen::Matrix3d> svd(cross, Eigen::ComputeFullU | Eigen::ComputeFullV);
+	Eigen::Matrix3d i = Eigen::Matrix3d::Identity();
+	if ((svd.matrixU() * svd.matrixV().transpose()).determinant() < 0)
+		i(2, 2) = -1;
+	rot = (svd.matrixV() * i * svd.matrixU().transpose()).transpose();
+
+	double sum = 0.0;
+	for (auto& d : deltas)
+		sum += (d.ref - rot * d.target).squaredNorm();
+	residual = sum / deltas.size();
+	return true;
+}
+
+static double TranslationFitResidual(const std::vector<Sample>& samples, const Eigen::Matrix3d& rotation)
+{
+	Eigen::Matrix3d AtA = Eigen::Matrix3d::Zero();
+	Eigen::Vector3d Atb = Eigen::Vector3d::Zero();
+	for (size_t i = 0; i < samples.size(); i++)
+	{
+		Eigen::Matrix3d QAi = samples[i].ref.rot.transpose();
+		Eigen::Matrix3d QBi = (rotation * samples[i].target.rot).transpose();
+		Eigen::Vector3d Di = samples[i].ref.trans - rotation * samples[i].target.trans;
+		for (size_t j = 0; j < i; j++)
+		{
+			Eigen::Matrix3d QAj = samples[j].ref.rot.transpose();
+			Eigen::Matrix3d QBj = (rotation * samples[j].target.rot).transpose();
+			Eigen::Vector3d Dj = samples[j].ref.trans - rotation * samples[j].target.trans;
+			Eigen::Matrix3d dQA = QAj - QAi, dQB = QBj - QBi;
+			Eigen::Vector3d CA = QAj * Dj - QAi * Di, CB = QBj * Dj - QBi * Di;
+			AtA += dQA.transpose() * dQA + dQB.transpose() * dQB;
+			Atb += dQA.transpose() * CA + dQB.transpose() * CB;
+		}
+	}
+	Eigen::Vector3d tc = AtA.fullPivLu().solve(Atb);
+
+	Eigen::Vector3d mount = Eigen::Vector3d::Zero();
+	for (auto& s : samples)
+	{
+		Eigen::Matrix3d trackerRot = rotation * s.target.rot;
+		mount += trackerRot.transpose() * (s.ref.trans - (rotation * s.target.trans + tc));
+	}
+	mount /= (double)samples.size();
+
+	double sum = 0.0;
+	for (auto& s : samples)
+		sum += (rotation * s.target.trans + tc + rotation * s.target.rot * mount - s.ref.trans).squaredNorm();
+	return sum / samples.size();
+}
+
+static bool GridMinimum(const std::vector<double>& grid, const std::vector<double>& values, double& best)
+{
+	size_t k = std::min_element(values.begin(), values.end()) - values.begin();
+	if (k == 0 || k + 1 >= values.size())
+		return false;
+	best = grid[k];
+	double a = values[k - 1], b = values[k], c = values[k + 1];
+	double den = a - 2.0 * b + c;
+	if (den > 0.0)
+		best += 0.5 * (a - c) / den * (grid[k + 1] - grid[k]);
+	return true;
+}
+
+static void EstimateTimeOffsets(const std::vector<Sample>& samples, double& tauRot, double& tauPos)
+{
+	tauRot = 0.0;
+	tauPos = 0.0;
+
+	std::vector<Eigen::Vector3d> omegaAll, velocityAll;
+	TargetRates(samples, omegaAll, velocityAll);
+
+	size_t stride = samples.size() > 240 ? (samples.size() + 239) / 240 : 1;
+	std::vector<Sample> sub;
+	std::vector<Eigen::Vector3d> omega, velocity;
+	for (size_t i = 0; i < samples.size(); i += stride)
+	{
+		sub.push_back(samples[i]);
+		omega.push_back(omegaAll[i]);
+		velocity.push_back(velocityAll[i]);
+	}
+
+	std::vector<double> grid, rotResidual;
+	for (double tau = -0.05; tau <= 0.15001; tau += 0.004)
+	{
+		Eigen::Matrix3d rot;
+		double r;
+		if (!RotationFit(ShiftTargets(sub, omega, velocity, tau, 0.0), rot, r))
+			return;
+		grid.push_back(tau);
+		rotResidual.push_back(r);
+	}
+
+	double bestRot;
+	if (!GridMinimum(grid, rotResidual, bestRot))
+	{
+		CalCtx.Log("Time offset between headset and tracker not found, calibrating without it\n");
+		return;
+	}
+
+	Eigen::Matrix3d rot;
+	double rotAtBest = 0.0, rotAtZero = 0.0;
+	RotationFit(sub, rot, rotAtZero);
+	RotationFit(ShiftTargets(sub, omega, velocity, bestRot, 0.0), rot, rotAtBest);
+
+	std::vector<double> posResidual;
+	for (double tau : grid)
+		posResidual.push_back(TranslationFitResidual(ShiftTargets(sub, omega, velocity, bestRot, tau), rot));
+
+	double bestPos = 0.0;
+	bool havePos = GridMinimum(grid, posResidual, bestPos);
+
+	tauRot = bestRot;
+	tauPos = havePos ? bestPos : 0.0;
+
+	char buf[256];
+	snprintf(buf, sizeof buf, "Time offset between headset and tracker: rotation %.1f ms, position %.1f ms (rotation fit %.3f -> %.3f deg rms)\n",
+		tauRot * 1000.0, tauPos * 1000.0, std::sqrt(rotAtZero) * 180.0 / EIGEN_PI, std::sqrt(rotAtBest) * 180.0 / EIGEN_PI);
+	CalCtx.Log(buf);
 }
 
 static double EstimateHmdSpaceScale(const std::vector<Sample> &samples, const Eigen::Matrix3d &rotation, double targetModelScale)
@@ -513,6 +691,192 @@ void SendOneEuroParams()
 	}
 }
 
+static Eigen::Matrix3d CalibrationMatrix(const CalibrationContext &ctx)
+{
+	Eigen::Vector3d e = ctx.calibratedRotation * EIGEN_PI / 180.0;
+	return (Eigen::AngleAxisd(e(0), Eigen::Vector3d::UnitZ()) *
+		Eigen::AngleAxisd(e(1), Eigen::Vector3d::UnitY()) *
+		Eigen::AngleAxisd(e(2), Eigen::Vector3d::UnitX())).toRotationMatrix();
+}
+
+static std::string LighthouseFingerprint(const CalibrationContext &ctx)
+{
+	uint64_t universe = 0;
+	if (ctx.targetID < vr::k_unMaxTrackedDeviceCount)
+	{
+		vr::ETrackedPropertyError err = vr::TrackedProp_Success;
+		universe = vr::VRSystem()->GetUint64TrackedDeviceProperty(ctx.targetID, vr::Prop_CurrentUniverseId_Uint64, &err);
+		if (err != vr::TrackedProp_Success)
+			universe = 0;
+	}
+
+	std::vector<std::pair<std::string, Eigen::Vector3d>> stations;
+	for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; ++id)
+	{
+		if (vr::VRSystem()->GetTrackedDeviceClass(id) != vr::TrackedDeviceClass_TrackingReference)
+			continue;
+		if (!ctx.devicePoses[id].bPoseIsValid || GetDeviceTrackingSystem(id) != ctx.targetTrackingSystem)
+			continue;
+		stations.push_back({ GetDeviceSerial(id), Pose(ctx.devicePoses[id].mDeviceToAbsoluteTracking).trans });
+	}
+	std::sort(stations.begin(), stations.end(), [](const auto &a, const auto &b) { return a.first < b.first; });
+
+	std::ostringstream out;
+	out << universe << "|";
+	for (size_t i = 0; i < stations.size(); i++)
+		out << (i ? "," : "") << stations[i].first;
+	out << "|";
+	bool first = true;
+	for (size_t i = 0; i < stations.size(); i++)
+		for (size_t j = i + 1; j < stations.size(); j++)
+		{
+			out << (first ? "" : ",") << (long long)std::llround((stations[i].second - stations[j].second).norm() * 1000.0);
+			first = false;
+		}
+	return out.str();
+}
+
+static std::vector<std::string> SplitString(const std::string &s, char sep)
+{
+	std::vector<std::string> parts;
+	std::string cur;
+	for (char c : s)
+	{
+		if (c == sep) { parts.push_back(cur); cur.clear(); }
+		else cur += c;
+	}
+	parts.push_back(cur);
+	return parts;
+}
+
+static bool ParseFingerprint(const std::string &fp, std::string &universe, std::map<std::pair<std::string, std::string>, long long> &distances, std::vector<std::string> &serials)
+{
+	auto parts = SplitString(fp, '|');
+	if (parts.size() != 3)
+		return false;
+	universe = parts[0];
+	serials.clear();
+	if (!parts[1].empty())
+		serials = SplitString(parts[1], ',');
+	std::vector<std::string> d;
+	if (!parts[2].empty())
+		d = SplitString(parts[2], ',');
+	size_t k = 0;
+	for (size_t i = 0; i < serials.size(); i++)
+		for (size_t j = i + 1; j < serials.size(); j++)
+		{
+			if (k >= d.size())
+				return false;
+			distances[{ serials[i], serials[j] }] = std::atoll(d[k++].c_str());
+		}
+	return true;
+}
+
+static bool FingerprintsMatch(const std::string &stored, const std::string &current)
+{
+	std::string uA, uB;
+	std::map<std::pair<std::string, std::string>, long long> dA, dB;
+	std::vector<std::string> sA, sB;
+	if (!ParseFingerprint(stored, uA, dA, sA) || !ParseFingerprint(current, uB, dB, sB))
+		return false;
+	if (uA != "0" && uB != "0" && uA != uB)
+		return false;
+	for (auto &s : sB)
+		if (std::find(sA.begin(), sA.end(), s) == sA.end())
+			return false;
+	for (auto &entry : dB)
+	{
+		auto it = dA.find(entry.first);
+		if (it != dA.end() && std::llabs(it->second - entry.second) > 30)
+			return false;
+	}
+	return true;
+}
+
+static bool ComputeTiltSeed(const CalibrationContext &ctx, vr::HmdVector3d_t &seed)
+{
+	if (ctx.tiltHistory.empty() || !ctx.followSlamHmd || ctx.noHeadTracker || !ctx.validProfile)
+		return false;
+	if (!ctx.tiltFingerprint.empty() && !FingerprintsMatch(ctx.tiltFingerprint, LighthouseFingerprint(ctx)))
+		return false;
+
+	Eigen::Matrix3d C = CalibrationMatrix(ctx);
+	const Eigen::Vector3d up(0.0, 1.0, 0.0);
+	std::vector<Eigen::Vector3d> tilts;
+	for (auto &g : ctx.tiltHistory)
+	{
+		Eigen::Vector3d u = (C * g).normalized();
+		Eigen::Vector3d axis = up.cross(u);
+		double s = axis.norm();
+		double angle = std::atan2(s, up.dot(u));
+		tilts.push_back(s > 1e-12 ? Eigen::Vector3d(axis / s * angle) : Eigen::Vector3d::Zero());
+	}
+
+	Eigen::Vector3d mean = Eigen::Vector3d::Zero();
+	for (auto &t : tilts)
+		mean += t;
+	double n = (double)tilts.size();
+	mean /= n;
+	double spread;
+	if (tilts.size() > 1)
+	{
+		double sum = 0.0;
+		for (auto &t : tilts)
+			sum += (t - mean).squaredNorm();
+		spread = sum / (n - 1.0);
+	}
+	else
+	{
+		double prior = 0.3 * EIGEN_PI / 180.0;
+		spread = prior * prior;
+	}
+	double m2 = mean.squaredNorm();
+	double w = m2 > 0.0 ? m2 / (m2 + spread / n + spread) : 0.0;
+	Eigen::Vector3d result = mean * w;
+	seed.v[0] = result.x();
+	seed.v[1] = 0.0;
+	seed.v[2] = result.z();
+	return true;
+}
+
+static void RecordTilt(CalibrationContext &ctx, const protocol::DriverStatus &st)
+{
+	if (st.tiltSteps < ctx.tiltStepsRecorded)
+	{
+		ctx.tiltStepsRecorded = 0;
+		ctx.tiltSessionEntry = -1;
+	}
+	if (!st.slamUpValid || st.tiltSteps <= ctx.tiltStepsRecorded || !ctx.enabled || !ctx.validProfile || !ctx.followSlamHmd || ctx.noHeadTracker)
+		return;
+
+	Eigen::Vector3d g(st.slamUpInLighthouse.v[0], st.slamUpInLighthouse.v[1], st.slamUpInLighthouse.v[2]);
+	if (!(g.norm() > 0.5))
+		return;
+	g.normalize();
+
+	std::string fingerprint = LighthouseFingerprint(ctx);
+	if (!ctx.tiltFingerprint.empty() && !FingerprintsMatch(ctx.tiltFingerprint, fingerprint))
+	{
+		ctx.tiltHistory.clear();
+		ctx.tiltSessionEntry = -1;
+		ctx.Log("Lighthouse setup changed, stored world tilt history cleared\n");
+	}
+
+	if (ctx.tiltSessionEntry < 0 || ctx.tiltSessionEntry >= (int)ctx.tiltHistory.size())
+	{
+		ctx.tiltHistory.push_back(g);
+		if (ctx.tiltHistory.size() > 10)
+			ctx.tiltHistory.erase(ctx.tiltHistory.begin());
+		ctx.tiltSessionEntry = (int)ctx.tiltHistory.size() - 1;
+	}
+	else
+		ctx.tiltHistory[ctx.tiltSessionEntry] = g;
+
+	ctx.tiltFingerprint = fingerprint;
+	ctx.tiltStepsRecorded = st.tiltSteps;
+	ctx.refinementDirty = true;
+}
+
 void SendHmdTrackerCommand(uint32_t hmdID, uint32_t trackerID, bool enabled)
 {
 	protocol::Request req(protocol::RequestSetHmdTracker);
@@ -531,6 +895,8 @@ void SendHmdTrackerCommand(uint32_t hmdID, uint32_t trackerID, bool enabled)
 	req.setHmdTracker.followSlamHmd = CalCtx.followSlamHmd;
 	// Calibration reads the tracker back through SteamVR.
 	req.setHmdTracker.hideHeadTracker = CalCtx.hideHeadTracker && CalCtx.state == CalibrationState::None;
+	req.setHmdTracker.tiltSeed = { 0.0, 0.0, 0.0 };
+	req.setHmdTracker.tiltSeedValid = enabled && ComputeTiltSeed(CalCtx, req.setHmdTracker.tiltSeed);
 	Driver.SendBlocking(req);
 }
 
@@ -722,6 +1088,13 @@ void ScanAndApplyProfile(CalibrationContext &ctx)
 		{
 			ctx.driverStatus = statusResp.status;
 			const auto &st = ctx.driverStatus;
+			RecordTilt(ctx, st);
+			if (ctx.refinementDirty && ctx.validProfile && ctx.timeLastTick - ctx.timeRefinementSaved > 30.0)
+			{
+				SaveProfile(ctx);
+				ctx.refinementDirty = false;
+				ctx.timeRefinementSaved = ctx.timeLastTick;
+			}
 			if (st.refinementValid && ctx.enabled && ctx.validProfile && st.refinementSolves >= 1)
 			{
 				auto differs = [](double a, double b) { return std::fabs(a - b) > 1e-12; };
@@ -1066,6 +1439,7 @@ void CalibrationTick(double time)
 	}
 
 	auto &samples = collectedSamples;
+	sample.time = time;
 	samples.push_back(sample);
 
 	double elapsed = time - ctx.sequenceStart;
@@ -1101,6 +1475,15 @@ void CalibrationTick(double time)
 			return;
 		}
 		coplanarRetries = 0;
+
+		double tauRot = 0.0, tauPos = 0.0;
+		EstimateTimeOffsets(samples, tauRot, tauPos);
+		if (tauRot != 0.0 || tauPos != 0.0)
+		{
+			std::vector<Eigen::Vector3d> omega, velocity;
+			TargetRates(samples, omega, velocity);
+			samples = ShiftTargets(samples, omega, velocity, tauRot, tauPos);
+		}
 
 		ctx.calibratedRotation = CalibrateRotation(samples);
 

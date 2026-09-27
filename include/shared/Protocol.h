@@ -13,7 +13,7 @@
 
 namespace protocol
 {
-	const uint32_t Version = 14;
+	const uint32_t Version = 15;
 
 	enum RequestType
 	{
@@ -88,6 +88,8 @@ namespace protocol
 		bool followSlamHmd;
 		// Follow mode only.
 		bool hideHeadTracker;
+		bool tiltSeedValid;
+		vr::HmdVector3d_t tiltSeed;
 	};
 
 	struct SetSlamSync
@@ -129,6 +131,9 @@ namespace protocol
 		vr::HmdQuaternion_t offsetRotation;
 		vr::HmdVector3d_t offsetTranslation;
 		double hmdScale;
+		bool slamUpValid;
+		vr::HmdVector3d_t slamUpInLighthouse;
+		uint32_t tiltSteps;
 	};
 
 	struct Request
