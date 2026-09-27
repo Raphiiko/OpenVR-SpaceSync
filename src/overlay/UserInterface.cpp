@@ -997,6 +997,15 @@ void UserInterface::RenderSmoothing()
 	changed |= SliderRow("Smoothing", "", &CalCtx.lighthouseSmoothing, 0.0, 100.0, "%.0f %%", maxW, 90.0f, 76.0f);
 	VSpace(24.0f);
 
+	SectionHeader("Latency Compensation", maxW);
+	VSpace(10.0f);
+	TextWrapped(F.regular, 12.5f, P.textMuted, maxW,
+		"Lighthouse devices reach the headset about 40-60 ms late. SpaceSync predicts where they are right now and learns your movement while you play. "
+		"100% removes the delay, 0% turns the prediction off. Lower it if devices overshoot when you stop quickly.");
+	VSpace(12.0f);
+	changed |= SliderRow("Strength", "", &CalCtx.latencyCompensation, 0.0, 100.0, "%.0f %%", maxW, 90.0f, 76.0f);
+	VSpace(24.0f);
+
 	SectionHeader("Headset Tracker", maxW);
 	VSpace(10.0f);
 	changed |= CheckboxRow("Smooth headset tracker",

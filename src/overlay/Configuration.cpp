@@ -120,6 +120,15 @@ static void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 	else
 		ctx.lighthouseSmoothing = 0.0;
 
+	if (obj["latencyComp"].is<double>())
+	{
+		ctx.latencyCompensation = obj["latencyComp"].get<double>();
+		if (ctx.latencyCompensation < 0.0) ctx.latencyCompensation = 0.0;
+		if (ctx.latencyCompensation > 100.0) ctx.latencyCompensation = 100.0;
+	}
+	else
+		ctx.latencyCompensation = 40.0;
+
 	if (obj["hideHeadTracker"].is<bool>())
 		ctx.hideHeadTracker = obj["hideHeadTracker"].get<bool>();
 	else
@@ -260,6 +269,8 @@ static void WriteProfile(CalibrationContext &ctx, std::ostream &out)
 	profile["dynPower"].set<bool>(ctx.dynamicBasestationPower);
 	double lhSmoothing = ctx.lighthouseSmoothing;
 	profile["lhSmoothing"].set<double>(lhSmoothing);
+	double latencyComp = ctx.latencyCompensation;
+	profile["latencyComp"].set<double>(latencyComp);
 	profile["hideHeadTracker"].set<bool>(ctx.hideHeadTracker);
 	profile["disableVoice"].set<bool>(ctx.disableVoiceHelp);
 	double language = (double)ctx.language;

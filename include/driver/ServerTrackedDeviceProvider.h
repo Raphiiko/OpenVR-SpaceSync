@@ -341,6 +341,8 @@ private:
 	};
 	DeviceFilter deviceFilters[vr::k_unMaxTrackedDeviceCount];
 	std::atomic<double> deviceSmoothing{ 0.0 };
+	std::atomic<double> latencyStrength{ 0.4 };
+	double latencyStrengthLogged = -1.0;
 	double deviceSmoothingLogTime = 0.0;
 
 	struct TrackerFilter

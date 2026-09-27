@@ -680,6 +680,7 @@ void SendOneEuroParams()
 	req.setOneEuro.head = CalCtx.headFilterParams;
 	req.setOneEuro.drift = CalCtx.driftFilterParams;
 	req.setOneEuro.deviceSmoothing = CalCtx.lighthouseSmoothing;
+	req.setOneEuro.latencyCompensation = CalCtx.latencyCompensation;
 
 	try
 	{

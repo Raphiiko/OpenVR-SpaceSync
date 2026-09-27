@@ -13,7 +13,7 @@
 
 namespace protocol
 {
-	const uint32_t Version = 15;
+	const uint32_t Version = 16;
 
 	enum RequestType
 	{
@@ -111,6 +111,7 @@ namespace protocol
 		OneEuroParams head;
 		OneEuroParams drift;
 		double deviceSmoothing;
+		double latencyCompensation;
 	};
 
 	struct DriverStatus

@@ -67,6 +67,7 @@ struct CalibrationContext
 	protocol::OneEuroParams headFilterParams = { 5.0, 0.8, 1.0 };
 	protocol::OneEuroParams driftFilterParams = { 3.0, 1.3, 0.6 };
 	double lighthouseSmoothing = 0.0;
+	double latencyCompensation = 40.0;
 	bool dynamicBasestationPower = false;
 	bool disableVoiceHelp = false;
 	int language = 0;

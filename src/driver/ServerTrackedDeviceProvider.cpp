@@ -273,6 +273,16 @@ void ServerTrackedDeviceProvider::SetOneEuro(const protocol::SetOneEuro& cmd)
 			LOG("Lighthouse device smoothing %s: %.0f %% (cutoff %.2f Hz)", ds >= 0.5 ? "enabled" : "disabled", ds, minCutoff);
 		}
 	}
+
+	double lc = cmd.latencyCompensation;
+	if (!(lc >= 0.0)) lc = 0.0;
+	if (lc > 100.0) lc = 100.0;
+	latencyStrength.store(lc / 100.0);
+	if (lc != latencyStrengthLogged)
+	{
+		latencyStrengthLogged = lc;
+		LOG("Latency compensation strength: %.0f %%", lc);
+	}
 }
 
 void ServerTrackedDeviceProvider::UpdateDrift(const vr::HmdQuaternion_t& correctedRotation, const double(&correctedPosition)[3],
@@ -537,9 +547,10 @@ void ServerTrackedDeviceProvider::CompensateLatency(uint32_t openVRID, vr::Drive
 	if (velocityFrameDevice.load() == 1)
 		v = quaternionRotateVector(q, v);
 
+	const double strength = latencyStrength.load();
 	vr::HmdVector3d_t dPos = slot->position.step(t, x, q, v, tauPos, hs);
 	for (int i = 0; i < 3; i++)
-		pose.vecPosition[i] += dPos.v[i];
+		pose.vecPosition[i] += dPos.v[i] * strength;
 
 	int angularFrame = angularFrameDevice.load();
 	if (angularFrame >= 0)
@@ -548,7 +559,7 @@ void ServerTrackedDeviceProvider::CompensateLatency(uint32_t openVRID, vr::Drive
 		if (angularFrame == 1)
 			w = quaternionRotateVector(q, w);
 		vr::HmdVector3d_t dRot = slot->rotation.step(t, x, q, w, tauRot, hs);
-		pose.qRotation = quaternionNormalize(quaternionFromRotationVector(dRot) * q);
+		pose.qRotation = quaternionNormalize(quaternionFromRotationVector(vecScale(dRot, strength)) * q);
 	}
 
 	auto& p = slot->position;
@@ -559,10 +570,10 @@ void ServerTrackedDeviceProvider::CompensateLatency(uint32_t openVRID, vr::Drive
 		double pNo = std::sqrt(p.errWithout / p.errCount) * 1000.0, pWith = std::sqrt(p.errWith / p.errCount) * 1000.0;
 		double rNo = r.errCount > 0 ? std::sqrt(r.errWithout / r.errCount) * 180.0 / POSE_PI : 0.0;
 		double rWith = r.errCount > 0 ? std::sqrt(r.errWith / r.errCount) * 180.0 / POSE_PI : 0.0;
-		LOG("Latency compensation device %u: position error %.1f -> %.1f mm (%+.0f %%), rotation error %.2f -> %.2f deg (%+.0f %%), tau pos %.0f / rot %.0f ms, learned lead %.0f ms",
+		LOG("Latency compensation device %u: position error %.1f -> %.1f mm (%+.0f %%), rotation error %.2f -> %.2f deg (%+.0f %%) at full strength, applied %.0f %%, tau pos %.0f / rot %.0f ms, learned lead %.0f ms",
 			openVRID, pNo, pWith, pNo > 0.0 ? 100.0 * (pWith / pNo - 1.0) : 0.0,
 			rNo, rWith, rNo > 0.0 ? 100.0 * (rWith / rNo - 1.0) : 0.0,
-			tauPos * 1000.0, tauRot * 1000.0, p.rls.th[0] * 1000.0);
+			strength * 100.0, tauPos * 1000.0, tauRot * 1000.0, p.rls.th[0] * 1000.0);
 		p.errWithout = p.errWith = 0.0;
 		p.errCount = 0;
 		r.errWithout = r.errWith = 0.0;
