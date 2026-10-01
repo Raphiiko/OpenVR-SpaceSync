@@ -13,7 +13,7 @@
 
 namespace protocol
 {
-	const uint32_t Version = 18;
+	const uint32_t Version = 19;
 
 	enum RequestType
 	{
@@ -93,6 +93,9 @@ namespace protocol
 		vr::HmdVector3d_t tiltSeed;
 		bool stayAligned;
 		uint32_t stayHipID;
+		bool calibrationLatencyValid;
+		double calibrationLatencyRot;
+		double calibrationLatencyPos;
 	};
 
 	struct SetSlamSync

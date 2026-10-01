@@ -511,9 +511,9 @@ static double EstimateHmdSpaceScale(const std::vector<Sample> &samples, const Ei
 	char buf[256];
 	if (spread < ScaleSpreadThreshold)
 	{
-		snprintf(buf, sizeof buf, "Headset scale not estimated (movement spread %.2f m, needs %.1f m of walking), assuming 1. The driver refines it while you play.\n", spread, ScaleSpreadThreshold);
+		snprintf(buf, sizeof buf, "Headset scale not measured (movement spread %.2f m, needs %.1f m of walking)\n", spread, ScaleSpreadThreshold);
 		CalCtx.Log(buf);
-		return 1.0;
+		return 0.0;
 	}
 
 	Eigen::MatrixXd coefficients(samples.size() * 3, 7);
@@ -535,9 +535,9 @@ static double EstimateHmdSpaceScale(const std::vector<Sample> &samples, const Ei
 
 	if (fittedScale < MinCalibratedScale || fittedScale > MaxCalibratedScale)
 	{
-		snprintf(buf, sizeof buf, "Fitted headset scale %.5f is outside %.2f..%.2f, assuming 1\n", fittedScale, MinCalibratedScale, MaxCalibratedScale);
+		snprintf(buf, sizeof buf, "Fitted headset scale %.5f is outside %.2f..%.2f, not used\n", fittedScale, MinCalibratedScale, MaxCalibratedScale);
 		CalCtx.Log(buf);
-		return 1.0;
+		return 0.0;
 	}
 
 	snprintf(buf, sizeof buf, "Fitted headset space scale relative to lighthouse: %.5f (%+.2f%%) from %.2f m of movement, implied absolute headset scale: %.5f\n",
@@ -602,30 +602,18 @@ static double RetargetingErrorRMS(const std::vector<Sample> &samples, const Eige
 	return std::sqrt(accum / (double)samples.size());
 }
 
-Sample CollectSample(const CalibrationContext &ctx)
+Sample CollectSample(const CalibrationContext &ctx, const char *&problem)
 {
-	vr::TrackedDevicePose_t reference, target;
-	reference.bPoseIsValid = false;
-	target.bPoseIsValid = false;
+	const vr::TrackedDevicePose_t &reference = ctx.devicePoses[0];
+	const vr::TrackedDevicePose_t &target = ctx.devicePoses[ctx.targetID];
 
-	reference = ctx.devicePoses[0];
-	target = ctx.devicePoses[ctx.targetID];
-
-	bool ok = true;
-	if (!reference.bPoseIsValid)
-	{
-		CalCtx.Log("Reference device is not tracking\n"); ok = false;
-	}
-	if (!target.bPoseIsValid)
-	{
-		CalCtx.Log("Target device is not tracking\n"); ok = false;
-	}
-	if (!ok)
-	{
-		CalCtx.Log("Aborting calibration!\n");
-		CalCtx.state = CalibrationState::None;
+	problem = nullptr;
+	if (!reference.bPoseIsValid || reference.eTrackingResult != vr::TrackingResult_Running_OK)
+		problem = "The headset is not tracking";
+	else if (!target.bPoseIsValid || target.eTrackingResult != vr::TrackingResult_Running_OK)
+		problem = "The device on your head is not tracking (sensors covered?)";
+	if (problem)
 		return Sample();
-	}
 
 	return Sample(
 		Pose(reference.mDeviceToAbsoluteTracking),
@@ -717,6 +705,19 @@ static Eigen::Matrix3d CalibrationMatrix(const CalibrationContext &ctx)
 	return (Eigen::AngleAxisd(e(0), Eigen::Vector3d::UnitZ()) *
 		Eigen::AngleAxisd(e(1), Eigen::Vector3d::UnitY()) *
 		Eigen::AngleAxisd(e(2), Eigen::Vector3d::UnitX())).toRotationMatrix();
+}
+
+void KeepCalibrationSpotAfterRotationEdit(const Eigen::Vector3d &previousRotation)
+{
+	auto &ctx = CalCtx;
+	if (!ctx.calibrationSpotValid)
+		return;
+	Eigen::Vector3d e = previousRotation * EIGEN_PI / 180.0;
+	Eigen::Matrix3d before = (Eigen::AngleAxisd(e(0), Eigen::Vector3d::UnitZ()) *
+		Eigen::AngleAxisd(e(1), Eigen::Vector3d::UnitY()) *
+		Eigen::AngleAxisd(e(2), Eigen::Vector3d::UnitX())).toRotationMatrix();
+	Eigen::Matrix3d after = CalibrationMatrix(ctx);
+	ctx.calibratedTranslation += ctx.calibratedScale * ((before - after) * ctx.calibrationSpot) * 100.0;
 }
 
 static std::string LighthouseFingerprint(const CalibrationContext &ctx)
@@ -859,6 +860,183 @@ static bool ComputeTiltSeed(const CalibrationContext &ctx, vr::HmdVector3d_t &se
 	return true;
 }
 
+static Eigen::Matrix3d YawRotation(double angle)
+{
+	return Eigen::AngleAxisd(angle, Eigen::Vector3d::UnitY()).toRotationMatrix();
+}
+
+static double YawBetween(const Eigen::Matrix3d &rot, const Eigen::Matrix3d &base)
+{
+	Eigen::Matrix3d y = rot * base.transpose();
+	return std::atan2(y(0, 2) - y(2, 0), y(0, 0) + y(2, 2));
+}
+
+static Eigen::Matrix3d ShortestArc(const Eigen::Vector3d &from, const Eigen::Vector3d &to)
+{
+	Eigen::Vector3d a = from.normalized(), b = to.normalized();
+	Eigen::Vector3d axis = a.cross(b);
+	double s = axis.norm(), c = a.dot(b);
+	if (s < 1e-15)
+		return Eigen::Matrix3d::Identity();
+	return Eigen::AngleAxisd(std::atan2(s, c), axis / s).toRotationMatrix();
+}
+
+static double AngleBetween(const Eigen::Vector3d &a, const Eigen::Vector3d &b)
+{
+	return std::atan2(a.cross(b).norm(), a.dot(b));
+}
+
+static std::vector<DSample> RotationPairs(const std::vector<Sample> &samples)
+{
+	std::vector<DSample> pairs;
+	for (size_t i = 0; i < samples.size(); i++)
+		for (size_t j = 0; j < i; j++)
+		{
+			auto delta = DeltaRotationSamples(samples[i], samples[j]);
+			if (delta.valid)
+				pairs.push_back(delta);
+		}
+	return pairs;
+}
+
+static Eigen::Matrix3d YawFromRotationAxes(const std::vector<DSample> &pairs, const Eigen::Matrix3d &level)
+{
+	double a = 0.0, b = 0.0;
+	for (auto &p : pairs)
+	{
+		Eigen::Vector3d v = level * p.target;
+		a += p.ref.x() * v.x() + p.ref.z() * v.z();
+		b += p.ref.x() * v.z() - p.ref.z() * v.x();
+	}
+	return YawRotation(std::atan2(b, a)) * level;
+}
+
+static Eigen::Matrix3d YawFromPositions(const std::vector<Sample> &samples, const Eigen::Matrix3d &level)
+{
+	Eigen::Matrix<double, 8, 8> AtA = Eigen::Matrix<double, 8, 8>::Zero();
+	Eigen::Matrix<double, 8, 1> Atb = Eigen::Matrix<double, 8, 1>::Zero();
+	for (auto &s : samples)
+	{
+		Eigen::Vector3d v = level * s.target.trans, p = s.ref.trans;
+		const Eigen::Matrix3d &q = s.ref.rot;
+		Eigen::Matrix<double, 3, 8> A = Eigen::Matrix<double, 3, 8>::Zero();
+		Eigen::Vector3d b;
+		A(0, 0) = v.x(); A(0, 1) = v.z(); A(0, 2) = 1.0; A.block<1, 3>(0, 5) = -q.row(0); b(0) = p.x();
+		A(1, 3) = 1.0; A.block<1, 3>(1, 5) = -q.row(1); b(1) = p.y() - v.y();
+		A(2, 0) = v.z(); A(2, 1) = -v.x(); A(2, 4) = 1.0; A.block<1, 3>(2, 5) = -q.row(2); b(2) = p.z();
+		AtA += A.transpose() * A;
+		Atb += A.transpose() * b;
+	}
+	Eigen::Matrix<double, 8, 1> x = AtA.fullPivLu().solve(Atb);
+	return YawRotation(std::atan2(x(1), x(0))) * level;
+}
+
+static Eigen::Matrix3d FuseYaw(const std::vector<DSample> &pairs, const std::vector<Sample> &samples, const Eigen::Matrix3d &fromAxes, const Eigen::Matrix3d &fromPositions, const Eigen::Matrix3d &level, double &axesWeight)
+{
+	double er = 0.0, sr = 0.0;
+	for (auto &p : pairs)
+	{
+		Eigen::Vector3d v = fromAxes * p.target;
+		er += (p.ref - v).squaredNorm();
+		sr += v.x() * v.x() + v.z() * v.z();
+	}
+	double varAxes = er / (std::max)(sr, 1e-12);
+
+	Eigen::Matrix<double, 6, 6> AtA = Eigen::Matrix<double, 6, 6>::Zero();
+	Eigen::Matrix<double, 6, 1> Atb = Eigen::Matrix<double, 6, 1>::Zero();
+	Eigen::Vector3d center = Eigen::Vector3d::Zero();
+	for (auto &s : samples)
+	{
+		Eigen::Matrix<double, 3, 6> A;
+		A.block<3, 3>(0, 0) = Eigen::Matrix3d::Identity();
+		A.block<3, 3>(0, 3) = -s.ref.rot;
+		Eigen::Vector3d b = s.ref.trans - fromPositions * s.target.trans;
+		AtA += A.transpose() * A;
+		Atb += A.transpose() * b;
+		center += fromPositions * s.target.trans;
+	}
+	Eigen::Matrix<double, 6, 1> td = AtA.fullPivLu().solve(Atb);
+	center /= (double)samples.size();
+	double ep = 0.0, sp = 0.0;
+	for (auto &s : samples)
+	{
+		Eigen::Vector3d v = fromPositions * s.target.trans;
+		ep += (s.ref.trans - (v + td.head<3>() - s.ref.rot * td.tail<3>())).squaredNorm();
+		Eigen::Vector3d d = v - center;
+		sp += d.x() * d.x() + d.z() * d.z();
+	}
+	double varPositions = ep / (std::max)(sp, 1e-12);
+
+	axesWeight = varAxes + varPositions > 0.0 ? varPositions / (varAxes + varPositions) : 0.5;
+	double ya = YawBetween(fromAxes, level), yp = YawBetween(fromPositions, level);
+	return YawRotation(ya + (1.0 - axesWeight) * std::remainder(yp - ya, 2.0 * EIGEN_PI)) * level;
+}
+
+static bool SavedWorldUp(const CalibrationContext &ctx, Eigen::Vector3d &up, double &sigma)
+{
+	up = Eigen::Vector3d::UnitY();
+	sigma = 0.4 * EIGEN_PI / 180.0;
+	if (ctx.tiltHistory.empty())
+		return false;
+	if (!ctx.tiltFingerprint.empty() && !FingerprintsMatch(ctx.tiltFingerprint, LighthouseFingerprint(ctx)))
+		return false;
+
+	Eigen::Vector3d mean = Eigen::Vector3d::Zero();
+	for (auto &g : ctx.tiltHistory)
+		mean += g.normalized();
+	if (!(mean.norm() > 1e-9))
+		return false;
+	mean.normalize();
+
+	double n = (double)ctx.tiltHistory.size(), spread = 0.0;
+	for (auto &g : ctx.tiltHistory)
+	{
+		double a = AngleBetween(g.normalized(), mean);
+		spread += a * a;
+	}
+	double minSigma = 0.2 * EIGEN_PI / 180.0;
+	double var = n > 1.0 ? spread / (n - 1.0) * (1.0 + 1.0 / n) : 0.0;
+	sigma = std::sqrt((std::max)(minSigma * minSigma, var));
+	up = mean;
+	return true;
+}
+
+static Eigen::Matrix3d LevelledRotation(const CalibrationContext &ctx, const std::vector<Sample> &samples, const Eigen::Matrix3d &fullRot)
+{
+	auto pairs = RotationPairs(samples);
+	if (pairs.size() < 10)
+		return fullRot;
+
+	double er = 0.0, sr = 0.0;
+	for (auto &p : pairs)
+	{
+		er += (p.ref - fullRot * p.target).squaredNorm();
+		sr += p.target.squaredNorm();
+	}
+	double calVar = er / (std::max)(sr, 1e-12);
+
+	Eigen::Vector3d priorUp;
+	double priorSigma;
+	bool saved = SavedWorldUp(ctx, priorUp, priorSigma);
+	double priorVar = priorSigma * priorSigma;
+	double calWeight = priorVar / (priorVar + calVar);
+	Eigen::Vector3d calUp = fullRot.transpose() * Eigen::Vector3d::UnitY();
+	Eigen::Vector3d up = (calWeight * calUp + (1.0 - calWeight) * priorUp).normalized();
+	Eigen::Matrix3d level = ShortestArc(up, Eigen::Vector3d::UnitY());
+
+	double axesWeight = 0.5;
+	Eigen::Matrix3d rot = FuseYaw(pairs, samples, YawFromRotationAxes(pairs, level), YawFromPositions(samples, level), level, axesWeight);
+
+	const double deg = 180.0 / EIGEN_PI;
+	char buf[320];
+	snprintf(buf, sizeof buf, "Levelled with %s: measured tilt %.2f deg, reference tilt %.2f deg (+-%.2f), used %.2f deg; yaw %.0f%% from head turns, %.0f%% from head movement\n",
+		saved ? "the saved world tilt" : "lighthouse gravity",
+		AngleBetween(calUp, Eigen::Vector3d::UnitY()) * deg, AngleBetween(priorUp, Eigen::Vector3d::UnitY()) * deg, priorSigma * deg,
+		AngleBetween(up, Eigen::Vector3d::UnitY()) * deg, axesWeight * 100.0, (1.0 - axesWeight) * 100.0);
+	CalCtx.Log(buf);
+	return rot;
+}
+
 static void RecordTilt(CalibrationContext &ctx, const protocol::DriverStatus &st)
 {
 	if (st.tiltSteps < ctx.tiltStepsRecorded)
@@ -940,6 +1118,9 @@ void SendHmdTrackerCommand(uint32_t hmdID, uint32_t trackerID, bool enabled)
 	req.setHmdTracker.tiltSeedValid = enabled && ComputeTiltSeed(CalCtx, req.setHmdTracker.tiltSeed);
 	req.setHmdTracker.stayAligned = enabled && CalCtx.stayAligned && CalCtx.followSlamHmd && CalCtx.noHeadTracker && CalCtx.state == CalibrationState::None;
 	req.setHmdTracker.stayHipID = req.setHmdTracker.stayAligned ? FindBodyTracker() : vr::k_unTrackedDeviceIndexInvalid;
+	req.setHmdTracker.calibrationLatencyValid = CalCtx.calibrationLatencyValid;
+	req.setHmdTracker.calibrationLatencyRot = CalCtx.calibrationLatencyRot;
+	req.setHmdTracker.calibrationLatencyPos = CalCtx.calibrationLatencyPos;
 	Driver.SendBlocking(req);
 }
 
@@ -1029,7 +1210,9 @@ void ScanAndApplyProfile(CalibrationContext &ctx)
 		}
 	}
 
-	bool overrideActive = ctx.enabled && ctx.validRelativeOffset && ctx.targetID != vr::k_unTrackedDeviceIndexInvalid && !ctx.noHeadTracker;
+	bool headTrackerProfile = !ctx.calibratedNoTracker
+		&& (ctx.targetID == vr::k_unTrackedDeviceIndexInvalid || vr::VRSystem()->GetTrackedDeviceClass(ctx.targetID) == vr::TrackedDeviceClass_GenericTracker);
+	bool overrideActive = ctx.enabled && ctx.validRelativeOffset && ctx.targetID != vr::k_unTrackedDeviceIndexInvalid && !ctx.noHeadTracker && headTrackerProfile;
 
 	// Follow mode: send the HMD command first so the driver is already in follow mode when the
 	// head tracker gets its transform. Otherwise transforms first, HMD command last.
@@ -1063,7 +1246,7 @@ void ScanAndApplyProfile(CalibrationContext &ctx)
 			if (err == vr::TrackedProp_Success && std::string(buffer) == ctx.targetTrackingSystem)
 			{
 				// Head tracker stays raw while it drives the headset, in follow mode it's aligned like the rest.
-				bool isHeadTracker = deviceClass == vr::TrackedDeviceClass_GenericTracker && id == ctx.targetID;
+				bool isHeadTracker = headTrackerProfile && deviceClass == vr::TrackedDeviceClass_GenericTracker && id == ctx.targetID;
 				applyCalibration = !isHeadTracker || ctx.followSlamHmd;
 			}
 		}
@@ -1186,11 +1369,19 @@ void ScanAndApplyProfile(CalibrationContext &ctx)
 	}
 }
 
+static double lastGoodSampleTime = 0.0;
+static double carriedAbsoluteHmdScale = 1.0;
+
 static void BeginSamplingPhase(CalibrationContext &ctx, uint32_t targetID, double time)
 {
+	std::string hmdSerial = GetDeviceSerial(vr::k_unTrackedDeviceIndex_Hmd);
+	double absoluteScale = ctx.targetModelScale > 0.0 ? ctx.hmdScale / ctx.targetModelScale : ctx.hmdScale;
+	carriedAbsoluteHmdScale = ctx.validProfile && ctx.hmdSerial == hmdSerial && absoluteScale >= MinCalibratedScale && absoluteScale <= MaxCalibratedScale ? absoluteScale : 1.0;
+	lastGoodSampleTime = time;
+
 	ctx.targetID = targetID;
 	ctx.targetTrackingSystem = GetDeviceTrackingSystem(targetID);
-	ctx.hmdSerial = GetDeviceSerial(vr::k_unTrackedDeviceIndex_Hmd);
+	ctx.hmdSerial = hmdSerial;
 	ctx.trackerSerial = GetDeviceSerial(targetID);
 
 	char buf[256];
@@ -1477,11 +1668,20 @@ void CalibrationTick(double time)
 		return;
 	}
 
-	auto sample = CollectSample(ctx);
+	const char *problem = nullptr;
+	auto sample = CollectSample(ctx, problem);
 	if (!sample.valid)
 	{
+		if (time - lastGoodSampleTime > 1.0)
+		{
+			char buf[256];
+			snprintf(buf, sizeof buf, "%s for more than a second, aborting calibration! Previous calibration restored.\n", problem ? problem : "Tracking lost");
+			CalCtx.Log(buf);
+			AbortAndRestoreProfile(ctx);
+		}
 		return;
 	}
+	lastGoodSampleTime = time;
 
 	auto &samples = collectedSamples;
 	sample.time = time;
@@ -1544,10 +1744,26 @@ void CalibrationTick(double time)
 		if (ctx.targetModelScale <= 0.0)
 			ctx.targetModelScale = 1.0;
 
-		ctx.hmdScale = EstimateHmdSpaceScale(samples, calRot, ctx.targetModelScale);
+		double fittedHmdScale = EstimateHmdSpaceScale(samples, calRot, ctx.targetModelScale);
+		if (fittedHmdScale > 0.0)
+			ctx.hmdScale = fittedHmdScale;
+		else
+		{
+			ctx.hmdScale = carriedAbsoluteHmdScale * ctx.targetModelScale;
+			char buf[256];
+			snprintf(buf, sizeof buf, "Keeping the headset scale %.5f (absolute %.5f)\n", ctx.hmdScale, carriedAbsoluteHmdScale);
+			CalCtx.Log(buf);
+		}
 
 		for (auto &sample : samples)
 			sample.ref.trans /= ctx.hmdScale;
+
+		if (ctx.noHeadTracker)
+		{
+			calRot = LevelledRotation(ctx, samples, calRot);
+			ctx.calibratedRotation = calRot.eulerAngles(2, 1, 0) * 180.0 / EIGEN_PI;
+			calRot = CalibrationMatrix(ctx);
+		}
 
 		ctx.calibratedTranslation = CalibrateTranslation(samples, calRot, calScale);
 		Eigen::Vector3d calTransM = ctx.calibratedTranslation * 0.01;
@@ -1568,6 +1784,17 @@ void CalibrationTick(double time)
 		}
 
 		ComputeRelativeOffset(ctx, samples, calRot, calTransM, calScale);
+
+		ctx.calibrationLatencyValid = tauRot != 0.0;
+		ctx.calibrationLatencyRot = tauRot;
+		ctx.calibrationLatencyPos = tauPos != 0.0 ? tauPos : tauRot;
+
+		Eigen::Vector3d spot = Eigen::Vector3d::Zero();
+		for (auto &sample : samples)
+			spot += sample.target.trans;
+		ctx.calibrationSpot = spot / (double)samples.size();
+		ctx.calibrationSpotValid = true;
+		ctx.calibratedNoTracker = ctx.noHeadTracker;
 
 		ctx.validProfile = true;
 		ctx.lastCalibrationOk = true;

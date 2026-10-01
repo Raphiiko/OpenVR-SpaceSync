@@ -168,6 +168,12 @@ UserInterface::Status UserInterface::BuildStatus(const VRState& state) const
 		s.detail = "Click the circle to calibrate";
 		s.color = P.textMuted;
 	}
+	else if (!CalCtx.noHeadTracker && CalCtx.calibratedNoTracker)
+	{
+		s.headline = "Calibrated without a head tracker";
+		s.detail = "Calibrate again with the tracker on your head";
+		s.color = P.danger;
+	}
 	else if (!s.tracker && !CalCtx.noHeadTracker)
 	{
 		s.headline = "Headset tracker not connected";
@@ -630,13 +636,15 @@ void UserInterface::RenderEdit(const Status& status)
 		{ { "Scale", &CalCtx.calibratedScale, 0.01, false }, { "HMD Scale", &CalCtx.hmdScale, 0.01, true }, { nullptr, nullptr, 0.0, false } },
 	};
 
-	if (CalCtx.followSlamHmd)
+	const bool runtimeAlignment = CalCtx.followSlamHmd && !CalCtx.noHeadTracker;
+	if (runtimeAlignment)
 	{
 		TextWrapped(F.regular, 12.0f, P.textDim, maxW,
 			"Greyed out fields do nothing in HMD Driven mode: the runtime alignment measures yaw and position against your head every frame and undoes those edits within a few seconds. Switch to Lighthouse Driven to use them.");
 		VSpace(14.0f);
 	}
 
+	const Eigen::Vector3d rotationBefore = CalCtx.calibratedRotation;
 	const float colW = (maxW - 2.0f * 14.0f) / 3.0f;
 	for (int r = 0; r < 3; r++)
 	{
@@ -647,7 +655,7 @@ void UserInterface::RenderEdit(const Status& status)
 			const Field& f = rows[r][col];
 			if (!f.label)
 				continue;
-			const bool live = f.worksInHmdDriven || !CalCtx.followSlamHmd;
+			const bool live = f.worksInHmdDriven || !runtimeAlignment;
 			float x = x0 + col * px(colW + 14.0f);
 			ImGui::SetCursorPos(ImVec2(x, yRow));
 			Text(F.regular, 12.5f, live ? P.textMuted : P.textDisabled, f.label);
@@ -661,6 +669,8 @@ void UserInterface::RenderEdit(const Status& status)
 		if (r < 2)
 			VSpace(18.0f);
 	}
+	if (CalCtx.calibratedRotation != rotationBefore)
+		KeepCalibrationSpotAfterRotationEdit(rotationBefore);
 
 	VSpace(20.0f);
 	ButtonOpts save;
@@ -1004,6 +1014,11 @@ void UserInterface::RenderSmoothing()
 		"100% removes the delay, 0% turns the prediction off. Lower it if devices overshoot when you stop quickly.");
 	VSpace(12.0f);
 	changed |= SliderRow("Strength", "", &CalCtx.latencyCompensation, 0.0, 100.0, "%.0f %%", maxW, 90.0f, 76.0f);
+	if (CalCtx.noHeadTracker && CalCtx.validProfile && !CalCtx.calibrationLatencyValid)
+	{
+		VSpace(8.0f);
+		TextWrapped(F.regular, 12.5f, P.textDim, maxW, "Not active yet without a head tracker. Calibrate once so SpaceSync can measure the delay.");
+	}
 	VSpace(24.0f);
 
 	SectionHeader("Headset Tracker", maxW);

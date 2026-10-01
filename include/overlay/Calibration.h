@@ -30,6 +30,12 @@ struct CalibrationContext
 	double calibratedScale = 1.0;
 	double targetModelScale = 1.0;
 	double hmdScale = 1.0;
+	bool calibrationLatencyValid = false;
+	double calibrationLatencyRot = 0.0;
+	double calibrationLatencyPos = 0.0;
+	bool calibrationSpotValid = false;
+	Eigen::Vector3d calibrationSpot = Eigen::Vector3d::Zero();
+	bool calibratedNoTracker = false;
 
 	vr::HmdQuaternion_t relativeRotation = { 1, 0, 0, 0 };
 	vr::HmdVector3d_t relativeTranslation = { 0, 0, 0 };
@@ -108,6 +114,12 @@ struct CalibrationContext
 		calibratedScale = 1.0;
 		targetModelScale = 1.0;
 		hmdScale = 1.0;
+		calibrationLatencyValid = false;
+		calibrationLatencyRot = 0.0;
+		calibrationLatencyPos = 0.0;
+		calibrationSpotValid = false;
+		calibrationSpot = Eigen::Vector3d::Zero();
+		calibratedNoTracker = false;
 		relativeRotation = { 1, 0, 0, 0 };
 		relativeTranslation = { 0, 0, 0 };
 		validRelativeOffset = false;
@@ -195,3 +207,4 @@ void LoadChaperoneBounds();
 void ApplyChaperoneBounds();
 void SendOneEuroParams();
 void SendUniverseLock();
+void KeepCalibrationSpotAfterRotationEdit(const Eigen::Vector3d &previousRotation);

@@ -83,6 +83,15 @@ static void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 	if (ctx.hmdScale <= 0.0)
 		ctx.hmdScale = 1.0;
 
+	ctx.calibrationLatencyValid = obj["calLatencyRot"].is<double>() && obj["calLatencyPos"].is<double>();
+	ctx.calibrationLatencyRot = ctx.calibrationLatencyValid ? obj["calLatencyRot"].get<double>() : 0.0;
+	ctx.calibrationLatencyPos = ctx.calibrationLatencyValid ? obj["calLatencyPos"].get<double>() : 0.0;
+
+	ctx.calibrationSpotValid = obj["calSpotX"].is<double>() && obj["calSpotY"].is<double>() && obj["calSpotZ"].is<double>();
+	ctx.calibrationSpot = ctx.calibrationSpotValid
+		? Eigen::Vector3d(obj["calSpotX"].get<double>(), obj["calSpotY"].get<double>(), obj["calSpotZ"].get<double>())
+		: Eigen::Vector3d::Zero();
+
 	ctx.fallbackToSlam = obj["fallbackSlam"].get<bool>();
 	ctx.enableAngularVelocity = obj["eAngVel"].get<bool>();
 
@@ -100,6 +109,11 @@ static void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 		ctx.noHeadTracker = obj["noHeadTracker"].get<bool>();
 	else
 		ctx.noHeadTracker = false;
+
+	if (obj["calibratedNoTracker"].is<bool>())
+		ctx.calibratedNoTracker = obj["calibratedNoTracker"].get<bool>();
+	else
+		ctx.calibratedNoTracker = ctx.noHeadTracker;
 
 	if (obj["mountRefined"].is<bool>())
 		ctx.mountRefined = obj["mountRefined"].get<bool>();
@@ -269,6 +283,18 @@ static void WriteProfile(CalibrationContext &ctx, std::ostream &out)
 	profile["scale"].set<double>(ctx.calibratedScale);
 	profile["targetModelScale"].set<double>(ctx.targetModelScale);
 	profile["hmdScale"].set<double>(ctx.hmdScale);
+	if (ctx.calibrationLatencyValid)
+	{
+		profile["calLatencyRot"].set<double>(ctx.calibrationLatencyRot);
+		profile["calLatencyPos"].set<double>(ctx.calibrationLatencyPos);
+	}
+	if (ctx.calibrationSpotValid)
+	{
+		profile["calSpotX"].set<double>(ctx.calibrationSpot.x());
+		profile["calSpotY"].set<double>(ctx.calibrationSpot.y());
+		profile["calSpotZ"].set<double>(ctx.calibrationSpot.z());
+	}
+	profile["calibratedNoTracker"].set<bool>(ctx.calibratedNoTracker);
 
 	profile["fallbackSlam"].set<bool>(ctx.fallbackToSlam);
 	profile["eAngVel"].set<bool>(ctx.enableAngularVelocity);

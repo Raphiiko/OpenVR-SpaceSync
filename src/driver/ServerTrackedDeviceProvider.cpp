@@ -92,6 +92,15 @@ void ServerTrackedDeviceProvider::SetHmdTracker(const protocol::SetHmdTracker& c
 	if (!cmd.enabled)
 		hmdTracker.enabled.store(false, std::memory_order_release);
 
+	if (!cmd.enabled && wasEnabled && hmdTracker.followSlam && hmdTracker.trackerID >= vr::k_unMaxTrackedDeviceCount && drift.valid)
+	{
+		noTrackerKeep.valid = true;
+		noTrackerKeep.calRotation = driftCalRotation;
+		noTrackerKeep.calTranslation = driftCalTranslation;
+		noTrackerKeep.estimator = drift.estimator;
+		noTrackerKeep.frame = hmdFrame;
+	}
+
 	double cmdScale = cmd.hmdScale > 0.0 ? cmd.hmdScale : 1.0;
 	bool keepOffsets = false;
 	if (cmd.enabled && wasEnabled)
@@ -128,11 +137,11 @@ void ServerTrackedDeviceProvider::SetHmdTracker(const protocol::SetHmdTracker& c
 	tiltSeedValid = cmd.tiltSeedValid;
 	tiltSeed = cmd.tiltSeed;
 
+	bool wantStay = cmd.enabled && cmd.followSlamHmd && cmd.stayAligned && cmd.trackerID >= vr::k_unMaxTrackedDeviceCount;
+	bool stayTurnsOn = wantStay && !stayWanted.load();
+	bool stayCalChanged = !OffsetsEqual(cmd.calibrationRotation, cmd.calibrationTranslation, 1.0, stayCalRotation, stayCalTranslation, 1.0);
+	bool alignmentRestored = false;
 	{
-		bool wantStay = cmd.enabled && cmd.followSlamHmd && cmd.stayAligned && cmd.trackerID >= vr::k_unMaxTrackedDeviceCount;
-		bool calChanged = !OffsetsEqual(cmd.calibrationRotation, cmd.calibrationTranslation, 1.0, stayCalRotation, stayCalTranslation, 1.0);
-		if (wantStay != stayWanted.load() || (wantStay && calChanged))
-			stayResetPending.store(true);
 		stayCalRotation = cmd.calibrationRotation;
 		stayCalTranslation = cmd.calibrationTranslation;
 		stayHipID.store(cmd.stayHipID);
@@ -213,17 +222,57 @@ void ServerTrackedDeviceProvider::SetHmdTracker(const protocol::SetHmdTracker& c
 			}
 			if (cmd.followSlamHmd && cmd.trackerID >= vr::k_unMaxTrackedDeviceCount)
 			{
-				drift.estimator.reset();
-				drift.estimator.valid = true;
-				drift.estimator.yaw = 0.0;
-				drift.estimator.translation = { 0, 0, 0 };
-				drift.rotation = { 1, 0, 0, 0 };
-				drift.translation = { 0, 0, 0 };
-				worldTilt = { 1, 0, 0, 0 };
-				drift.valid = true;
-				LOG("Follow mode without head tracker: static alignment from calibration, headset recenters are carried over");
+				bool running = wasEnabled && drift.valid;
+				bool sameAsKept = !wasEnabled && noTrackerKeep.valid && OffsetsEqual(cmd.calibrationRotation, cmd.calibrationTranslation, 1.0, noTrackerKeep.calRotation, noTrackerKeep.calTranslation, 1.0);
+				if (running)
+				{
+					LOG("Follow mode without head tracker: settings changed while running, alignment and carried-over recenters kept");
+				}
+				else if (sameAsKept)
+				{
+					drift.estimator = noTrackerKeep.estimator;
+					worldTilt = { 1, 0, 0, 0 };
+					drift.rotation = quaternionNormalize(drift.estimator.rotation());
+					drift.translation = drift.estimator.translation;
+					hmdFrame = noTrackerKeep.frame;
+					drift.valid = true;
+					alignmentRestored = true;
+					LOG("Follow mode without head tracker: calibration unchanged, restored the alignment with its carried-over recenters (yaw %.1f deg)", quaternionYawDeg(drift.rotation));
+				}
+				else
+				{
+					drift.estimator.reset();
+					drift.estimator.valid = true;
+					drift.estimator.yaw = 0.0;
+					drift.estimator.translation = { 0, 0, 0 };
+					drift.rotation = { 1, 0, 0, 0 };
+					drift.translation = { 0, 0, 0 };
+					worldTilt = { 1, 0, 0, 0 };
+					drift.valid = true;
+					stayResetPending.store(true);
+					LOG("Follow mode without head tracker: static alignment from calibration, headset recenters are carried over");
+				}
+				driftCalRotation = cmd.calibrationRotation;
+				driftCalTranslation = cmd.calibrationTranslation;
+				noTrackerKeep.valid = false;
 			}
 		}
+		if (cmd.followSlamHmd && cmd.trackerID >= vr::k_unMaxTrackedDeviceCount)
+		{
+			double rot = cmd.calibrationLatencyValid ? (std::min)(0.12, (std::max)(0.0, cmd.calibrationLatencyRot)) : -1.0;
+			double pos = cmd.calibrationLatencyValid ? (std::min)(0.12, (std::max)(0.0, cmd.calibrationLatencyPos)) : -1.0;
+			if (rot != latencyTauRot.load() || pos != latencyTauPos.load())
+			{
+				if (cmd.calibrationLatencyValid)
+					LOG("Latency compensation without head tracker: lighthouse delay from calibration, rotation %.0f ms, position %.0f ms", rot * 1000.0, pos * 1000.0);
+				else
+					LOG("Latency compensation without head tracker: no delay measured by this calibration, compensation off until you recalibrate");
+			}
+			latencyTauRot.store(rot);
+			latencyTauPos.store(pos);
+		}
+		if (wantStay && (stayCalChanged || (stayTurnsOn && !alignmentRestored)))
+			stayResetPending.store(true);
 		hmdTracker.enabled.store(true, std::memory_order_release);
 	}
 }
@@ -550,7 +599,7 @@ void ServerTrackedDeviceProvider::StayAlignedStep(double nowSeconds, double hmdT
 {
 	bool reset = stayResetPending.exchange(false);
 	bool wanted = stayWanted.load();
-	if (reset || (!wanted && stayRunning))
+	if (reset || (!wanted && stayRunning) || (wanted && !stayRunning && drift.valid))
 	{
 		stayAligner.reset();
 		stayHipIDUsed = vr::k_unTrackedDeviceIndexInvalid;

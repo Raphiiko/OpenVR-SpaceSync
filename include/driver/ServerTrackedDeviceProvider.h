@@ -211,6 +211,18 @@ private:
 		void reset() { primed = false; }
 	} hmdFrame;
 
+	vr::HmdQuaternion_t driftCalRotation = { 1, 0, 0, 0 };
+	vr::HmdVector3d_t driftCalTranslation = { 0, 0, 0 };
+
+	struct NoTrackerKeep
+	{
+		bool valid = false;
+		vr::HmdQuaternion_t calRotation = { 1, 0, 0, 0 };
+		vr::HmdVector3d_t calTranslation = { 0, 0, 0 };
+		align::YawTranslationEstimator estimator;
+		HmdFrameWatch frame;
+	} noTrackerKeep;
+
 	struct ResidualDiag
 	{
 		double yawNum = 0.0, yawDen = 0.0, posNum = 0.0, posDen = 0.0;
