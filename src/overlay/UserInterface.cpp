@@ -1157,6 +1157,70 @@ void UserInterface::RenderSettings()
 		"Parks the tracker mounted on your headset far out of the way so games and SteamVR stop treating it as a device in your play space. Alignment is unaffected. Needs HMD Driven with a tracker, and pauses itself while you calibrate.",
 		&CalCtx.hideHeadTracker, colW) && CalCtx.validProfile)
 		SaveProfile(CalCtx);
+	if (CheckboxRow("Stay Aligned",
+		"Only for HMD Driven + No Tracker, and it still requires at least one Vive/Tundra hip tracker (SteamVR role \"Waist\"). It reduces drift over time when hiccups occur. It will not completely eliminate drift, but it reduces it drastically.",
+		&CalCtx.stayAligned, colW) && CalCtx.validProfile)
+		SaveProfile(CalCtx);
+	if (CalCtx.stayAligned)
+	{
+		const auto& st = CalCtx.driverStatus;
+		VSpace(6.0f);
+		if (!(CalCtx.followSlamHmd && CalCtx.noHeadTracker))
+			Hint("Inactive: needs HMD Driven + No Tracker.", colW);
+		else if (!st.stayActive)
+			Hint("Waiting for calibration.", colW);
+		else if (!st.stayHipFound)
+			Hint("No tracker with SteamVR role Waist found. Only headset recenters and hiccups are handled.", colW);
+		else if (!st.stayBodyReady)
+			Hint("Learning the hip tracker. Stand normally for about a minute in total.", colW);
+		else if (st.stayRescuing)
+			Hint("Re-aligning after a headset pause.", colW);
+		else
+		{
+			char line[160];
+			std::snprintf(line, sizeof line, "%s %.1f deg / %.1f cm, %s %u, %s %u", loc::tr("Correction"), st.stayYawDeg, st.stayShiftM * 100.0,
+				loc::tr("recenters"), st.stayRecenters, loc::tr("hiccups held"), st.stayHeld);
+			Hint(line, colW);
+		}
+		VSpace(6.0f);
+	}
+	if (CheckboxRow("Lock Base Stations",
+		"Keeps your base stations where they were when you calibrated. SteamVR sometimes moves base stations by mistake (for example after a tracker loses tracking or the headset wakes from standby), which makes your hands, feet or the whole view jump. Works in all modes. If you really move a base station, just calibrate again.",
+		&CalCtx.lockBaseStations, colW))
+	{
+		SendUniverseLock();
+		if (CalCtx.validProfile)
+			SaveProfile(CalCtx);
+	}
+	if (CalCtx.lockBaseStations)
+	{
+		const auto& st = CalCtx.driverStatus;
+		VSpace(6.0f);
+		if (st.lockState == 1)
+			Hint("Calibrate once to activate the lock.", colW);
+		else if (st.lockState == 3)
+			Hint("Paused while calibrating.", colW);
+		else if (st.lockState == 2)
+		{
+			char line[200];
+			std::snprintf(line, sizeof line, "%s: %u. %s: %u, %s %.0f cm.", loc::tr("Locked base stations"), st.lockBases,
+				loc::tr("SteamVR moves held this session"), st.lockHeldJumps, loc::tr("largest"), st.lockLargestHeldM * 100.0);
+			Hint(line, colW);
+			if (st.lockOffsetM > 0.02)
+			{
+				std::snprintf(line, sizeof line, "%s %.0f cm / %.1f deg. %s", loc::tr("SteamVR currently places your devices away from the calibration by"),
+					st.lockOffsetM * 100.0, st.lockOffsetDeg, loc::tr("This is held. If you really moved a base station, calibrate again."));
+				Hint(line, colW);
+			}
+			if (st.lockInconsistentM > 0.1)
+			{
+				std::snprintf(line, sizeof line, "%s (%.0f cm). %s", loc::tr("Your SteamVR base station layout is inconsistent"),
+					st.lockInconsistentM * 100.0, loc::tr("Redo SteamVR Room Setup, then calibrate again."));
+				Hint(line, colW);
+			}
+		}
+		VSpace(6.0f);
+	}
 	if (CheckboxRow("Disable Voice Help",
 		"Disables the voice that tells you how to calibrate during the calibration.",
 		&CalCtx.disableVoiceHelp, colW))

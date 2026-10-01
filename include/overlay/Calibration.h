@@ -60,6 +60,9 @@ struct CalibrationContext
 	bool followSlamHmd = true;
 	bool noHeadTracker = false;
 	bool hideHeadTracker = true;
+	bool stayAligned = false;
+	bool lockBaseStations = false;
+	bool lockCommitPending = false;
 	float predictionTime = 1.0f;
 	float uiScale = 1.25f;            // UI content scale
 
@@ -191,3 +194,4 @@ void CancelCalibration();   // abort a running calibration, restore the saved pr
 void LoadChaperoneBounds();
 void ApplyChaperoneBounds();
 void SendOneEuroParams();
+void SendUniverseLock();

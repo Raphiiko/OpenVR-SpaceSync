@@ -8,6 +8,9 @@
 #include "AlignmentEstimator.h"
 #include "KalmanFilter.h"
 #include "LatencyPredictor.h"
+#include "StayAligned.h"
+#include "UniverseProbe.h"
+#include "UniverseLock.h"
 
 #include <openvr_driver.h>
 
@@ -51,6 +54,7 @@ public:
 	void SetHmdTracker(const protocol::SetHmdTracker &cmd);
 	void SetSlamSync(const protocol::SetSlamSync &cmd);
 	void SetOneEuro(const protocol::SetOneEuro &cmd);
+	void SetUniverseLock(const protocol::SetUniverseLock &cmd);
 	void GetStatus(protocol::DriverStatus &status);
 	bool HandleDevicePoseUpdated(uint32_t openVRID, vr::DriverPose_t &pose);
 
@@ -107,6 +111,48 @@ private:
 
 		void reset() { lost = false; lossStart = 0.0; hold = 0.0; waived = false; }
 	} reacquire;
+
+	void RebaseDrift(const stay::Frame& J);
+	void StoreHipSample(const vr::DriverPose_t& pose);
+	void ApplyStayAligned(vr::DriverPose_t& pose);
+	void StayAlignedStep(double nowSeconds, double hmdTime, const vr::HmdQuaternion_t& rawRotation, const double(&rawPosition)[3]);
+
+	universe::Probe universeProbe;
+	universe::Lock universeLock;
+
+	stay::Aligner stayAligner;
+	std::atomic<bool> stayWanted{ false };
+	std::atomic<bool> stayResetPending{ false };
+	std::atomic<uint32_t> stayHipID{ vr::k_unTrackedDeviceIndexInvalid };
+	uint32_t stayHipIDUsed = vr::k_unTrackedDeviceIndexInvalid;
+	bool stayRunning = false;
+	vr::HmdQuaternion_t stayCalRotation = { 1, 0, 0, 0 };
+	vr::HmdVector3d_t stayCalTranslation = { 0, 0, 0 };
+	double stayLogTime = 0.0;
+
+	struct StayShared
+	{
+		bool active = false;
+		stay::Frame correction;
+		bool hipFound = false;
+		bool bodyReady = false;
+		bool rescuing = false;
+		uint32_t recenters = 0;
+		uint32_t held = 0;
+		uint32_t rescues = 0;
+	};
+	std::mutex stayMutex;
+	StayShared stayShared;
+
+	struct HipSample
+	{
+		bool valid = false;
+		vr::HmdVector3d_t position = { 0, 0, 0 };
+		vr::HmdQuaternion_t rotation = { 1, 0, 0, 0 };
+		LARGE_INTEGER time = {};
+	};
+	std::mutex hipMutex;
+	HipSample hipSample;
 
 	bool tiltSeedValid = false;
 	vr::HmdVector3d_t tiltSeed = { 0, 0, 0 };

@@ -39,6 +39,11 @@ void IPCServer::HandleRequest(const protocol::Request &request, protocol::Respon
 		response.type = protocol::ResponseStatus;
 		break;
 
+	case protocol::RequestSetUniverseLock:
+		driver->SetUniverseLock(request.setUniverseLock);
+		response.type = protocol::ResponseSuccess;
+		break;
+
 	default:
 		LOG("Invalid IPC request: %d", request.type);
 		break;

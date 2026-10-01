@@ -128,6 +128,23 @@ void ServerTrackedDeviceProvider::SetHmdTracker(const protocol::SetHmdTracker& c
 	tiltSeedValid = cmd.tiltSeedValid;
 	tiltSeed = cmd.tiltSeed;
 
+	{
+		bool wantStay = cmd.enabled && cmd.followSlamHmd && cmd.stayAligned && cmd.trackerID >= vr::k_unMaxTrackedDeviceCount;
+		bool calChanged = !OffsetsEqual(cmd.calibrationRotation, cmd.calibrationTranslation, 1.0, stayCalRotation, stayCalTranslation, 1.0);
+		if (wantStay != stayWanted.load() || (wantStay && calChanged))
+			stayResetPending.store(true);
+		stayCalRotation = cmd.calibrationRotation;
+		stayCalTranslation = cmd.calibrationTranslation;
+		stayHipID.store(cmd.stayHipID);
+		stayWanted.store(wantStay);
+		if (!wantStay)
+		{
+			std::lock_guard<std::mutex> lock(stayMutex);
+			stayShared.active = false;
+			stayShared.correction = stay::Frame{};
+		}
+	}
+
 	if (keepOffsets)
 	{
 		hmdTracker.offsetRotation = baseRotation;
@@ -285,6 +302,13 @@ void ServerTrackedDeviceProvider::SetOneEuro(const protocol::SetOneEuro& cmd)
 	}
 }
 
+void ServerTrackedDeviceProvider::SetUniverseLock(const protocol::SetUniverseLock& cmd)
+{
+	if (!universeLock.log)
+		universeLock.log = [](const std::string& s) { LOG("%s", s.c_str()); };
+	universeLock.configure(cmd.enabled, cmd.calibrating, cmd.command);
+}
+
 void ServerTrackedDeviceProvider::UpdateDrift(const vr::HmdQuaternion_t& correctedRotation, const double(&correctedPosition)[3],
 	const vr::HmdQuaternion_t& rawRotation, const double(&rawPosition)[3], double confidence, double quality)
 {
@@ -378,6 +402,30 @@ void ServerTrackedDeviceProvider::GetStatus(protocol::DriverStatus& status)
 	status.refinementSolves = refine.applied;
 	status.refinementTranslationSolves = refine.appliedTranslation;
 
+	{
+		std::lock_guard<std::mutex> stayLock(stayMutex);
+		status.stayActive = stayShared.active;
+		status.stayHipFound = stayShared.hipFound;
+		status.stayBodyReady = stayShared.bodyReady;
+		status.stayRescuing = stayShared.rescuing;
+		status.stayRecenters = stayShared.recenters;
+		status.stayHeld = stayShared.held;
+		status.stayRescues = stayShared.rescues;
+		status.stayYawDeg = stay::Deg(stayShared.correction.yaw);
+		status.stayShiftM = stay::NormH(stayShared.correction.t);
+	}
+
+	{
+		universe::LockStatus ls = universeLock.status();
+		status.lockState = ls.state;
+		status.lockBases = ls.bases;
+		status.lockHeldJumps = ls.heldJumps;
+		status.lockLargestHeldM = ls.largestHeldM;
+		status.lockOffsetM = ls.offsetM;
+		status.lockOffsetDeg = ls.offsetDeg;
+		status.lockInconsistentM = ls.inconsistentM;
+	}
+
 	std::lock_guard<std::mutex> lock(effectiveMutex);
 	status.refinementValid = effectiveSharedValid && hmdTracker.enabled.load(std::memory_order_acquire);
 	status.offsetRotation = effectiveShared.rotation;
@@ -448,6 +496,153 @@ void ServerTrackedDeviceProvider::ApplyInverseDrift(vr::DriverPose_t& pose) cons
 	pose.vecWorldFromDriverTranslation[0] = rotated.v[0];
 	pose.vecWorldFromDriverTranslation[1] = rotated.v[1];
 	pose.vecWorldFromDriverTranslation[2] = rotated.v[2];
+}
+
+void ServerTrackedDeviceProvider::RebaseDrift(const stay::Frame& J)
+{
+	if (!drift.valid)
+		return;
+	drift.estimator.rebase(J.yaw, J.t, SlamToCorrectedScale());
+	drift.rotation = quaternionNormalize(worldTilt * drift.estimator.rotation());
+	drift.translation = quaternionRotateVector(worldTilt, drift.estimator.translation);
+	refine.clearSums();
+	driftLog.yawDeg = quaternionYawDeg(drift.rotation);
+	driftLog.translation = drift.translation;
+}
+
+void ServerTrackedDeviceProvider::StoreHipSample(const vr::DriverPose_t& pose)
+{
+	HipSample s;
+	s.valid = pose.poseIsValid && pose.deviceIsConnected && pose.result == vr::TrackingResult_Running_OK;
+	s.rotation = quaternionNormalize(pose.qWorldFromDriverRotation * pose.qRotation * pose.qDriverFromHeadRotation);
+	vr::HmdVector3d_t headLocal = quaternionRotateVector(pose.qRotation, pose.vecDriverFromHeadTranslation);
+	double driverLocal[3] = {
+		pose.vecPosition[0] + headLocal.v[0],
+		pose.vecPosition[1] + headLocal.v[1],
+		pose.vecPosition[2] + headLocal.v[2]
+	};
+	vr::HmdVector3d_t world = quaternionRotateVector(pose.qWorldFromDriverRotation, driverLocal);
+	s.position = vecAdd(world, vecFromArray(pose.vecWorldFromDriverTranslation));
+	QueryPerformanceCounter(&s.time);
+	std::lock_guard<std::mutex> lock(hipMutex);
+	hipSample = s;
+}
+
+void ServerTrackedDeviceProvider::ApplyStayAligned(vr::DriverPose_t& pose)
+{
+	stay::Frame c;
+	{
+		std::lock_guard<std::mutex> lock(stayMutex);
+		if (!stayShared.active)
+			return;
+		c = stayShared.correction;
+	}
+	if (c.yaw == 0.0 && c.t.v[0] == 0.0 && c.t.v[1] == 0.0 && c.t.v[2] == 0.0)
+		return;
+	pose.qWorldFromDriverRotation = quaternionNormalize(quaternionFromYaw(c.yaw) * pose.qWorldFromDriverRotation);
+	vr::HmdVector3d_t t = stay::Apply(c, vecFromArray(pose.vecWorldFromDriverTranslation));
+	pose.vecWorldFromDriverTranslation[0] = t.v[0];
+	pose.vecWorldFromDriverTranslation[1] = t.v[1];
+	pose.vecWorldFromDriverTranslation[2] = t.v[2];
+}
+
+void ServerTrackedDeviceProvider::StayAlignedStep(double nowSeconds, double hmdTime, const vr::HmdQuaternion_t& rawRotation, const double(&rawPosition)[3])
+{
+	bool reset = stayResetPending.exchange(false);
+	bool wanted = stayWanted.load();
+	if (reset || (!wanted && stayRunning))
+	{
+		stayAligner.reset();
+		stayHipIDUsed = vr::k_unTrackedDeviceIndexInvalid;
+		if (wanted)
+			LOG("Stay Aligned: started (HMD Driven + No Tracker)");
+		else if (stayRunning)
+			LOG("Stay Aligned: stopped");
+		stayRunning = false;
+	}
+	if (!wanted || !drift.valid)
+	{
+		std::lock_guard<std::mutex> lock(stayMutex);
+		stayShared.active = false;
+		stayShared.correction = stay::Frame{};
+		return;
+	}
+	stayRunning = true;
+
+	uint32_t hid = stayHipID.load();
+	if (hid != stayHipIDUsed)
+	{
+		stayAligner.resetBody();
+		stayHipIDUsed = hid;
+		{
+			std::lock_guard<std::mutex> lock(hipMutex);
+			hipSample.valid = false;
+		}
+		if (hid < vr::k_unMaxTrackedDeviceCount)
+			LOG("Stay Aligned: hip tracker is device %u, learning its offset below the head (stand still for about a minute in total)", hid);
+		else
+			LOG("Stay Aligned: no tracker with SteamVR role Waist found, only headset recenters and hiccups are handled");
+	}
+
+	stay::Hip hip;
+	if (hid < vr::k_unMaxTrackedDeviceCount)
+	{
+		HipSample hs;
+		{
+			std::lock_guard<std::mutex> lock(hipMutex);
+			hs = hipSample;
+		}
+		LARGE_INTEGER now, freq;
+		QueryPerformanceCounter(&now);
+		QueryPerformanceFrequency(&freq);
+		double age = (now.QuadPart - hs.time.QuadPart) / (double)freq.QuadPart;
+		hip.valid = hs.valid && age < 0.1;
+		hip.position = hs.position;
+		hip.rotation = hs.rotation;
+	}
+
+	stay::Event ev = stayAligner.step(hmdTime, rawRotation, vecFromArray(rawPosition), hip);
+
+	if (ev.jump)
+	{
+		if (ev.follow)
+			RebaseDrift(ev.J);
+		LOG("Stay Aligned: headset jump %.2f deg / %.1f cm (score %.0f, yaw after %.1f deg, recenter evidence %+.1f) -> %s",
+			stay::Deg(ev.J.yaw), vecNorm(ev.J.t) * 100.0, ev.T, ev.yawAfterDeg, ev.lambda,
+			ev.follow ? "followed (recenter)" : (ev.reverted ? "held, earlier hiccup reverted" : "held (hiccup)"));
+	}
+	if (ev.rescueChecked)
+		LOG("Stay Aligned: alignment check after headset pause: hip mismatch %.1f cm, yaw mismatch %.1f deg, pose looked re-centred %s -> %s",
+			ev.rescueTransMisM * 100.0, ev.rescueYawMisDeg, ev.rescueCanonical ? "yes" : "no",
+			ev.rebase && ev.rebaseKind == 1 ? "re-aligned from the hip tracker" : "alignment kept");
+	if (ev.rebase)
+	{
+		RebaseDrift(ev.K);
+		if (ev.rebaseKind == 2)
+			LOG("Stay Aligned: re-alignment settled (%.2f deg / %.1f cm folded in)", stay::Deg(ev.K.yaw), stay::NormH(ev.K.t) * 100.0);
+	}
+
+	const stay::Frame& c = stayAligner.correction();
+	{
+		std::lock_guard<std::mutex> lock(stayMutex);
+		stayShared.active = true;
+		stayShared.correction = c;
+		stayShared.hipFound = hid < vr::k_unMaxTrackedDeviceCount;
+		stayShared.bodyReady = stayAligner.bodyReady();
+		stayShared.rescuing = stayAligner.inRescue() || stayAligner.waitingAfterGap();
+		stayShared.recenters = stayAligner.recentersFollowed;
+		stayShared.held = stayAligner.jumpsHeld;
+		stayShared.rescues = stayAligner.rescues;
+	}
+
+	if (nowSeconds - stayLogTime > 60.0)
+	{
+		stayLogTime = nowSeconds;
+		LOG("Stay Aligned: hip %s, body model %s, correction %.2f deg / %.1f cm (sigma %.2f deg), updates %d ok / %d rejected, recenters %u, hiccups held %u, re-alignments %u",
+			hid < vr::k_unMaxTrackedDeviceCount ? (hip.valid ? "tracking" : "not tracking") : "none",
+			stayAligner.bodyReady() ? "ready" : "learning", stay::Deg(c.yaw), stay::NormH(c.t) * 100.0, stayAligner.yawSigmaDeg(),
+			stayAligner.accepted(), stayAligner.rejected(), stayAligner.recentersFollowed, stayAligner.jumpsHeld, stayAligner.rescues);
+	}
 }
 
 bool ServerTrackedDeviceProvider::DetectHmdFrameJump(const vr::DriverPose_t& pose, double& jumpYaw, vr::HmdVector3d_t& jumpTranslation)
@@ -797,6 +992,18 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 	if (openVRID >= vr::k_unMaxTrackedDeviceCount)
 		return true;
 
+	{
+		LARGE_INTEGER probeNow;
+		QueryPerformanceCounter(&probeNow);
+		double probeSeconds = QpcSeconds(probeNow);
+		universeProbe.onPose(openVRID, pose, probeSeconds, hmdTracker.hmdID);
+		universe::Summary sum;
+		if (openVRID == hmdTracker.hmdID && universeProbe.takeSummary(sum, probeSeconds))
+			LOG("Universe probe (last minute): base station updates %u, base moves %u, device frame changes %u (universe jumps %u, reference switches %u of which inconsistent %u, unmatched %u), capture windows %u",
+				sum.baseUpdates, sum.baseChanges, sum.frameChanges, sum.frameJumps, sum.referenceSwitches, sum.inconsistentSwitches, sum.unmatched, sum.events);
+		universeLock.apply(openVRID, pose, probeSeconds, hmdTracker.hmdID);
+	}
+
 	const bool overrideEnabled = hmdTracker.enabled.load(std::memory_order_acquire);
 	const bool followSlam = overrideEnabled && hmdTracker.followSlam;
 
@@ -823,7 +1030,12 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 
 		// Follow mode: move the calibrated lighthouse device into the headset's SLAM space.
 		if (followSlam && drift.valid)
+		{
 			ApplyInverseDrift(pose);
+			if (openVRID == stayHipID.load(std::memory_order_relaxed) && stayWanted.load(std::memory_order_relaxed))
+				StoreHipSample(pose);
+			ApplyStayAligned(pose);
+		}
 
 		if (deviceSmoothing.load(std::memory_order_relaxed) >= 0.5 && !(followSlam && openVRID == hmdTracker.trackerID))
 		{
@@ -930,7 +1142,12 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 							driftLog.yawDeg = quaternionYawDeg(drift.rotation);
 							driftLog.translation = drift.translation;
 						}
+						if (stayRunning)
+							stayAligner.externalShift(hmdTime, stay::Frame{ jumpYaw, jumpTranslation });
 					}
+
+					if (freshPose && hmdTracker.trackerID >= vr::k_unMaxTrackedDeviceCount)
+						StayAlignedStep(nowSeconds, hmdTime, rawRotation, rawPosition);
 
 					clock.addHmdPose(hmdTime, rawRotation, vecFromArray(rawPosition));
 					lastHmdTime = hmdTime;

@@ -692,6 +692,25 @@ void SendOneEuroParams()
 	}
 }
 
+void SendUniverseLock()
+{
+	protocol::Request req(protocol::RequestSetUniverseLock);
+	req.setUniverseLock.enabled = CalCtx.lockBaseStations;
+	req.setUniverseLock.calibrating = CalCtx.state != CalibrationState::None;
+	req.setUniverseLock.command = CalCtx.lockCommitPending && CalCtx.state == CalibrationState::None ? 1u : 0u;
+
+	try
+	{
+		Driver.SendBlocking(req);
+		if (req.setUniverseLock.command == 1u)
+			CalCtx.lockCommitPending = false;
+	}
+	catch (const std::runtime_error &e)
+	{
+		std::cerr << "Failed to send base station lock: " << e.what() << std::endl;
+	}
+}
+
 static Eigen::Matrix3d CalibrationMatrix(const CalibrationContext &ctx)
 {
 	Eigen::Vector3d e = ctx.calibratedRotation * EIGEN_PI / 180.0;
@@ -878,6 +897,27 @@ static void RecordTilt(CalibrationContext &ctx, const protocol::DriverStatus &st
 	ctx.refinementDirty = true;
 }
 
+static uint32_t FindBodyTracker()
+{
+	uint32_t chest = vr::k_unTrackedDeviceIndexInvalid;
+	char buffer[vr::k_unMaxPropertyStringSize];
+	for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; ++id)
+	{
+		if (vr::VRSystem()->GetTrackedDeviceClass(id) != vr::TrackedDeviceClass_GenericTracker)
+			continue;
+		vr::ETrackedPropertyError err = vr::TrackedProp_Success;
+		vr::VRSystem()->GetStringTrackedDeviceProperty(id, vr::Prop_ControllerType_String, buffer, vr::k_unMaxPropertyStringSize, &err);
+		if (err != vr::TrackedProp_Success)
+			continue;
+		std::string type(buffer);
+		if (type == "vive_tracker_waist")
+			return id;
+		if (type == "vive_tracker_chest" && chest == vr::k_unTrackedDeviceIndexInvalid)
+			chest = id;
+	}
+	return chest;
+}
+
 void SendHmdTrackerCommand(uint32_t hmdID, uint32_t trackerID, bool enabled)
 {
 	protocol::Request req(protocol::RequestSetHmdTracker);
@@ -898,6 +938,8 @@ void SendHmdTrackerCommand(uint32_t hmdID, uint32_t trackerID, bool enabled)
 	req.setHmdTracker.hideHeadTracker = CalCtx.hideHeadTracker && CalCtx.state == CalibrationState::None;
 	req.setHmdTracker.tiltSeed = { 0.0, 0.0, 0.0 };
 	req.setHmdTracker.tiltSeedValid = enabled && ComputeTiltSeed(CalCtx, req.setHmdTracker.tiltSeed);
+	req.setHmdTracker.stayAligned = enabled && CalCtx.stayAligned && CalCtx.followSlamHmd && CalCtx.noHeadTracker && CalCtx.state == CalibrationState::None;
+	req.setHmdTracker.stayHipID = req.setHmdTracker.stayAligned ? FindBodyTracker() : vr::k_unTrackedDeviceIndexInvalid;
 	Driver.SendBlocking(req);
 }
 
@@ -1080,6 +1122,7 @@ void ScanAndApplyProfile(CalibrationContext &ctx)
 	}
 
 	SendOneEuroParams();
+	SendUniverseLock();
 
 	try
 	{
@@ -1180,6 +1223,7 @@ void StartCalibration()
 	Detection.Clear();
 	collectedSamples.clear();
 	coplanarRetries = 0;
+	SendUniverseLock();
 }
 
 static void AbortAndRestoreProfile(CalibrationContext &ctx)
@@ -1538,6 +1582,8 @@ void CalibrationTick(double time)
 
 		ctx.state = CalibrationState::None;
 		samples.clear();
+		ctx.lockCommitPending = true;
+		SendUniverseLock();
 	}
 }
 

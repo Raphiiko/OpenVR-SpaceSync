@@ -134,6 +134,16 @@ static void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 	else
 		ctx.hideHeadTracker = false;
 
+	if (obj["stayAligned"].is<bool>())
+		ctx.stayAligned = obj["stayAligned"].get<bool>();
+	else
+		ctx.stayAligned = false;
+
+	if (obj["lockBaseStations"].is<bool>())
+		ctx.lockBaseStations = obj["lockBaseStations"].get<bool>();
+	else
+		ctx.lockBaseStations = false;
+
 	if (obj["disableVoice"].is<bool>())
 		ctx.disableVoiceHelp = obj["disableVoice"].get<bool>();
 	else
@@ -272,6 +282,8 @@ static void WriteProfile(CalibrationContext &ctx, std::ostream &out)
 	double latencyComp = ctx.latencyCompensation;
 	profile["latencyComp"].set<double>(latencyComp);
 	profile["hideHeadTracker"].set<bool>(ctx.hideHeadTracker);
+	profile["stayAligned"].set<bool>(ctx.stayAligned);
+	profile["lockBaseStations"].set<bool>(ctx.lockBaseStations);
 	profile["disableVoice"].set<bool>(ctx.disableVoiceHelp);
 	double language = (double)ctx.language;
 	profile["language"].set<double>(language);

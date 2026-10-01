@@ -13,7 +13,7 @@
 
 namespace protocol
 {
-	const uint32_t Version = 16;
+	const uint32_t Version = 18;
 
 	enum RequestType
 	{
@@ -24,6 +24,7 @@ namespace protocol
 		RequestSetSlamSync,
 		RequestSetOneEuro,
 		RequestGetStatus,
+		RequestSetUniverseLock,
 	};
 
 	enum ResponseType
@@ -90,6 +91,8 @@ namespace protocol
 		bool hideHeadTracker;
 		bool tiltSeedValid;
 		vr::HmdVector3d_t tiltSeed;
+		bool stayAligned;
+		uint32_t stayHipID;
 	};
 
 	struct SetSlamSync
@@ -114,6 +117,13 @@ namespace protocol
 		double latencyCompensation;
 	};
 
+	struct SetUniverseLock
+	{
+		bool enabled;
+		bool calibrating;
+		uint32_t command;
+	};
+
 	struct DriverStatus
 	{
 		bool driftValid;
@@ -135,6 +145,22 @@ namespace protocol
 		bool slamUpValid;
 		vr::HmdVector3d_t slamUpInLighthouse;
 		uint32_t tiltSteps;
+		bool stayActive;
+		bool stayHipFound;
+		bool stayBodyReady;
+		bool stayRescuing;
+		uint32_t stayRecenters;
+		uint32_t stayHeld;
+		uint32_t stayRescues;
+		double stayYawDeg;
+		double stayShiftM;
+		int32_t lockState;
+		uint32_t lockBases;
+		uint32_t lockHeldJumps;
+		double lockLargestHeldM;
+		double lockOffsetM;
+		double lockOffsetDeg;
+		double lockInconsistentM;
 	};
 
 	struct Request
@@ -146,6 +172,7 @@ namespace protocol
 			SetHmdTracker setHmdTracker;
 			SetSlamSync setSlamSync;
 			SetOneEuro setOneEuro;
+			SetUniverseLock setUniverseLock;
 		};
 
 		Request() : type(RequestInvalid) { }
