@@ -85,6 +85,7 @@ namespace lighthouse
 		bool running = false;
 		bool scanning = false;
 		bool autoWake = false;
+		bool enabled = true;
 		bool available = true;
 		std::string availabilityError;
 		BluetoothLEAdvertisementWatcher watcher{ nullptr };
@@ -224,7 +225,7 @@ namespace lighthouse
 				Log("%012llx %s attempt %d failed: %s", (unsigned long long)cmd.address, what, attempt + 1, failure);
 				{
 					std::lock_guard<std::mutex> lock(mutex);
-					if (!running)
+					if (!running || !enabled)
 						break;
 				}
 				std::this_thread::sleep_for(std::chrono::milliseconds(400));
@@ -305,6 +306,8 @@ namespace lighthouse
 			std::string name(w.begin(), w.end());
 			{
 				std::lock_guard<std::mutex> lock(mutex);
+				if (!enabled)
+					return;
 				auto it = stations.find(address);
 				if (it == stations.end())
 				{
@@ -392,7 +395,7 @@ namespace lighthouse
 	{
 		{
 			std::lock_guard<std::mutex> lock(mutex);
-			if (scanning || !available)
+			if (scanning || !available || !enabled)
 				return;
 		}
 		bool ok = true;
@@ -454,7 +457,7 @@ namespace lighthouse
 	{
 		{
 			std::lock_guard<std::mutex> lock(mutex);
-			if (!running)
+			if (!running || !enabled)
 				return;
 			queue.push_back({ address, (int)mode });
 		}
@@ -465,7 +468,7 @@ namespace lighthouse
 	{
 		{
 			std::lock_guard<std::mutex> lock(mutex);
-			if (!running)
+			if (!running || !enabled)
 				return;
 			for (auto const& kv : stations)
 				queue.push_back({ kv.first, (int)mode });
@@ -477,7 +480,7 @@ namespace lighthouse
 	{
 		{
 			std::lock_guard<std::mutex> lock(mutex);
-			if (!running)
+			if (!running || !enabled)
 				return;
 			queue.push_back({ address, -1 });
 		}
@@ -516,6 +519,33 @@ namespace lighthouse
 		std::lock_guard<std::mutex> lock(mutex);
 		autoWake = enabled;
 		Log("auto-wake %s", enabled ? "enabled" : "disabled");
+	}
+
+	void SetEnabled(bool value)
+	{
+		BluetoothLEAdvertisementWatcher stopped{ nullptr };
+		{
+			std::lock_guard<std::mutex> lock(mutex);
+			if (enabled == value)
+				return;
+			enabled = value;
+			if (!enabled)
+			{
+				queue.clear();
+				stations.clear();
+				passive.clear();
+				stopped = watcher;
+				watcher = nullptr;
+				scanning = false;
+			}
+		}
+		Log("basestation control %s", value ? "enabled" : "disabled");
+		try
+		{
+			if (stopped)
+				stopped.Stop();
+		}
+		catch (...) {}
 	}
 
 	void StandbyAllAndWait(int timeoutMs)

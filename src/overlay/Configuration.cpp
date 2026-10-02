@@ -120,6 +120,11 @@ static void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 	else
 		ctx.mountRefined = false;
 
+	if (obj["basestationControl"].is<bool>())
+		ctx.basestationControl = obj["basestationControl"].get<bool>();
+	else
+		ctx.basestationControl = true;
+
 	if (obj["dynPower"].is<bool>())
 		ctx.dynamicBasestationPower = obj["dynPower"].get<bool>();
 	else
@@ -302,6 +307,7 @@ static void WriteProfile(CalibrationContext &ctx, std::ostream &out)
 	profile["followSlam"].set<bool>(ctx.followSlamHmd);
 	profile["noHeadTracker"].set<bool>(ctx.noHeadTracker);
 	profile["mountRefined"].set<bool>(ctx.mountRefined);
+	profile["basestationControl"].set<bool>(ctx.basestationControl);
 	profile["dynPower"].set<bool>(ctx.dynamicBasestationPower);
 	double lhSmoothing = ctx.lighthouseSmoothing;
 	profile["lhSmoothing"].set<double>(lhSmoothing);
