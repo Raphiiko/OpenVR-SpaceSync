@@ -216,19 +216,20 @@ namespace lighthouse
 		{
 			SetBusy(cmd.address, true, nullptr);
 			const char* what = cmd.mode < 0 ? "refresh" : (cmd.mode == (int)Power::Awake ? "wake" : (cmd.mode == (int)Power::Standby ? "standby" : "sleep"));
-			const char* failure = nullptr;
+			const char* failure = "cancelled";
 			for (int attempt = 0; attempt < 3; attempt++)
 			{
-				failure = Attempt(cmd);
-				if (!failure)
-					break;
-				Log("%012llx %s attempt %d failed: %s", (unsigned long long)cmd.address, what, attempt + 1, failure);
+				if (attempt > 0)
+					std::this_thread::sleep_for(std::chrono::milliseconds(400));
 				{
 					std::lock_guard<std::mutex> lock(mutex);
 					if (!running || !enabled)
 						break;
 				}
-				std::this_thread::sleep_for(std::chrono::milliseconds(400));
+				failure = Attempt(cmd);
+				if (!failure)
+					break;
+				Log("%012llx %s attempt %d failed: %s", (unsigned long long)cmd.address, what, attempt + 1, failure);
 			}
 			Log("%012llx %s -> %s", (unsigned long long)cmd.address, what, failure ? failure : "ok");
 			SetBusy(cmd.address, false, failure);
